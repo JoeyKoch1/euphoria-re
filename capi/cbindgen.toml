@@ -1,0 +1,7 @@
+language = "C"
+include_guard = "EUPHORIA_H"
+cpp_compat = true
+usize_is_size_t = true
+
+[enum]
+rename_variants = "QualifiedScreamingSnakeCase"

@@ -1,0 +1,10 @@
+[package]
+name = "euphoria-sql"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+rusqlite.workspace = true
+serde.workspace = true

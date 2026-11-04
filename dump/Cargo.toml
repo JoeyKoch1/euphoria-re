@@ -1,0 +1,18 @@
+[package]
+name = "euphoria-dump"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+aero.workspace = true
+euphoria-apk.workspace = true
+euphoria-engine.workspace = true
+anyhow.workspace = true
+crc32fast.workspace = true
+flate2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+zip.workspace = true

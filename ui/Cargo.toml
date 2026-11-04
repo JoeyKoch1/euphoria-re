@@ -1,0 +1,22 @@
+[package]
+name = "euphoria-ui"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "euphoria"
+path = "src/main.rs"
+
+[dependencies]
+aero.workspace = true
+euphoria-apk.workspace = true
+euphoria-dump.workspace = true
+euphoria-engine.workspace = true
+euphoria-plugins.workspace = true
+euphoria-sql.workspace = true
+anyhow.workspace = true
+eframe.workspace = true
+rfd.workspace = true
+serde.workspace = true
+serde_json.workspace = true
