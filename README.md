@@ -165,6 +165,8 @@ cmake --build build --target scan_test
 ```bash
 ctest --test-dir build --output-on-failure
 ```
+**Disclaimer**
+While building this project, I'm using AI because why not take advantage of a tool that makes development easier and helps me make progress faster? It's free, it's useful, and it helps me get things done. So there's really no reason to complain.
 
 ## License
 
