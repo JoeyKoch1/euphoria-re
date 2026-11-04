@@ -134,6 +134,7 @@ fn arch_label(arch: Arch) -> &'static str {
 
 #[derive(Default)]
 struct App {
+    logo: Option<egui::TextureHandle>,
     project: Option<Project>,
     sql: Option<SqlView>,
     apk: Option<ApkView>,
@@ -417,6 +418,10 @@ impl App {
 
     fn toolbar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
+            if let Some(logo) = &self.logo {
+                ui.image((logo.id(), egui::vec2(24.0, 24.0)))
+                    .on_hover_text("Euphoria");
+            }
             let field = ui.add(
                 egui::TextEdit::singleline(&mut self.path)
                     .hint_text("Binary, .euph, or SQL file")
@@ -720,8 +725,16 @@ fn main() -> eframe::Result {
         app.open(Path::new(&path));
     }
 
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png"))
+        .expect("invalid bundled app icon");
+    let logo = egui::ColorImage::from_rgba_unmultiplied(
+        [icon.width as usize, icon.height as usize],
+        &icon.rgba,
+    );
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_maximized(true),
+        viewport: egui::ViewportBuilder::default()
+            .with_icon(icon)
+            .with_maximized(true),
         ..Default::default()
     };
 
@@ -730,6 +743,7 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| {
             theme::apply(&cc.egui_ctx);
+            app.logo = Some(cc.egui_ctx.load_texture("logo", logo, Default::default()));
             Ok(Box::new(app))
         }),
     )

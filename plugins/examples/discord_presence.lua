@@ -1,11 +1,11 @@
 -- @name Discord Presence
--- @version 2.0
+-- @version 2.1
 -- @author Euphoria
 -- @description Shows Euphoria, the open file's name, and the current tab on your Discord profile.
 -- @permissions discord
 
 local APPLICATION_ID = "1567508667090214942"
-local LOGO = "euphoria"
+local LOGO = "https://raw.githubusercontent.com/JoeyKoch1/euphoria-re/main/logo.jpg"
 local RETRY_SECONDS = 15
 
 local hide_name = false

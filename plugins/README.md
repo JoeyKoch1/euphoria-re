@@ -66,7 +66,7 @@ Needs `-- @permissions discord`. It talks to the Discord app on the same machine
 | Call | Does |
 |---|---|
 | `euphoria.discord.connect(application_id)` | Connects in the background |
-| `euphoria.discord.set_activity{ details=, state=, large_image=, large_text=, started= }` | Updates your profile. `large_image` is the name of art uploaded to your Discord application. |
+| `euphoria.discord.set_activity{ details=, state=, large_image=, large_text=, started= }` | Updates your profile. `large_image` is an uploaded asset name or a public image URL. |
 | `euphoria.discord.clear()` | Removes the activity |
 | `euphoria.discord.status()` | Returns the connection state as text |
 

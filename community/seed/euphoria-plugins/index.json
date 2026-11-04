@@ -3,13 +3,13 @@
     {
       "id": "discord_presence",
       "name": "Discord Presence",
-      "version": "2.0",
+      "version": "2.1",
       "author": "Euphoria",
       "description": "Shows Euphoria, the open file's name, and the current tab on your Discord profile.",
       "permissions": [
         "discord"
       ],
-      "sha256": "8712e2344e3f58b597744ba4093e5bea31403b2c26d1b08d9cd82917f72ad5da"
+      "sha256": "c63ea2aabab86b732f51f71f40ca56f1e7a8d8cad333ddc95a3aa2525c93aa54"
     },
     {
       "id": "hello_tab",

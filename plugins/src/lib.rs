@@ -464,7 +464,9 @@ pub fn check_discord(
     client.set_activity(discord::Activity {
         details: Some(details.to_owned()),
         state: Some(state.to_owned()),
-        large_image: Some("euphoria".to_owned()),
+        large_image: Some(
+            "https://raw.githubusercontent.com/JoeyKoch1/euphoria-re/main/logo.jpg".to_owned(),
+        ),
         large_text: Some("Euphoria".to_owned()),
         started: true,
     });
@@ -621,7 +623,7 @@ mod tests {
     fn older_shipped_examples_upgrade_when_the_folder_opens() {
         let dir = scratch("opens-upgraded");
         fs::create_dir_all(&dir).unwrap();
-        let old = "-- @name Discord Presence\n-- @version 1.0\n-- @author Euphoria\n";
+        let old = "-- @name Discord Presence\n-- @version 2.0\n-- @author Euphoria\n";
         fs::write(dir.join("discord_presence.lua"), old).unwrap();
         let mine = "-- @name String Search\n-- @version 9.9\n-- @author Someone\n";
         fs::write(dir.join("string_search.lua"), mine).unwrap();

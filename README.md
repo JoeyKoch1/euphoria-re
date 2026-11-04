@@ -1,3 +1,5 @@
+![Euphoria](logo.jpg)
+
 # euphoria-re
 
 A fast, scriptable disassembly workbench, currently a pre-alpha. Expect bugs and breaking changes. It parses PE, ELF, and Mach-O files, finds functions from the entry point, symbols, exports, and a prologue scan, and shows 32-bit and 64-bit x86 disassembly, control flow graphs, references, and strings in a desktop app. It also reports entropy, identifies common packers, decodes Base64 strings, finds single-byte XOR text, explains SQL files without running them, reads Android APKs down to Dalvik bytecode, dumps everything it knows about a file into one zip, turns x86 and x64 routines into C-like pseudocode, and debugs Windows programs with breakpoints and stepping. Function detection is still rough, and the decompiler is young: it won't match a mature commercial one on large optimized programs. See [PLAN.md](PLAN.md) for the roadmap.
