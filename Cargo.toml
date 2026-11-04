@@ -1,16 +1,20 @@
 [workspace]
 resolver = "3"
-members = ["aero", "apk", "capi", "dump", "formats", "engine", "plugins", "sql", "cli", "ui"]
+members = ["aero", "apk", "capi", "community", "debugger", "decompiler", "dump", "formats", "engine", "plugins", "sql", "cli", "ui"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 publish = false
+license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
 
 [workspace.dependencies]
 aero = { path = "aero" }
 euphoria-apk = { path = "apk" }
 euphoria-capi = { path = "capi" }
+euphoria-community = { path = "community" }
+euphoria-debugger = { path = "debugger" }
+euphoria-decompiler = { path = "decompiler" }
 euphoria-dump = { path = "dump" }
 euphoria-formats = { path = "formats" }
 euphoria-engine = { path = "engine" }
@@ -20,7 +24,7 @@ anyhow = "1.0"
 base64 = "0.23"
 crc32fast = "1.5"
 clap = { version = "4.6", features = ["derive"] }
-eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+eframe = { version = "0.37", default-features = false, features = ["clipboard", "default_fonts", "glow", "wayland", "x11"] }
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 iced-x86 = { version = "1.22", default-features = false, features = ["std", "decoder", "instr_info", "intel"] }
 mlua = { version = "0.11", features = ["lua54", "vendored"] }
@@ -36,5 +40,9 @@ webpki-roots = "1.0"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 zstd = "0.14"
 
+[profile.dev.package."*"]
+opt-level = 2
+
 [profile.release]
+strip = true
 lto = "thin"

@@ -474,7 +474,9 @@ pub(crate) fn disassemble(dex: &Dex, data: &[u8], code: &Code) -> Vec<Insn> {
         .saturating_add(code.units.saturating_mul(2))
         .min(data.len());
     let units: Vec<u16> = data[code.start.min(end)..end]
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .collect();
 

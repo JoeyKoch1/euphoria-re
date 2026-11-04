@@ -503,7 +503,7 @@ pub(crate) mod tests {
             body.extend_from_slice(text.as_bytes());
             body.push(0);
         }
-        while (string_data + body.len()) % 4 != 0 {
+        while !(string_data + body.len()).is_multiple_of(4) {
             body.push(0);
         }
 

@@ -28,6 +28,13 @@ enum Command {
         path: PathBuf,
         target: String,
     },
+    Decompile {
+        path: PathBuf,
+        target: String,
+    },
+    Lookup {
+        path: PathBuf,
+    },
     Inspect {
         path: PathBuf,
     },
@@ -66,12 +73,21 @@ enum Command {
         out: PathBuf,
         #[arg(long)]
         no_original: bool,
+        #[arg(long)]
+        no_decompile: bool,
     },
 }
 
 #[derive(Subcommand)]
 enum PluginCommand {
     List,
+    Market,
+    Install {
+        id: String,
+    },
+    Index {
+        repo: PathBuf,
+    },
     Run {
         script: PathBuf,
         binary: Option<PathBuf>,
@@ -113,6 +129,8 @@ fn main() -> Result<()> {
         Command::Analyze { path, save } => analyze(&path, save.as_deref(), cli.json),
         Command::Functions { path } => functions(&path, cli.json),
         Command::Graph { path, target } => graph(&path, &target, cli.json),
+        Command::Decompile { path, target } => decompile(&path, &target),
+        Command::Lookup { path } => public_lookup(&path, cli.json),
         Command::Inspect { path } => inspect(&path, cli.json),
         Command::Strings { path } => strings(&path, cli.json),
         Command::Xor { path } => xor(&path, cli.json),
@@ -124,9 +142,21 @@ fn main() -> Result<()> {
             path,
             out,
             no_original,
-        } => dump(&path, &out, !no_original, cli.json),
+            no_decompile,
+        } => dump(
+            &path,
+            &out,
+            euphoria_dump::Options {
+                include_original: !no_original,
+                decompile: !no_decompile,
+            },
+            cli.json,
+        ),
         Command::Plugin { command } => match command {
             PluginCommand::List => plugin_list(cli.json),
+            PluginCommand::Market => plugin_market(cli.json),
+            PluginCommand::Install { id } => plugin_install(&id),
+            PluginCommand::Index { repo } => plugin_index(&repo),
             PluginCommand::Run { script, binary } => plugin_run(&script, binary.as_deref()),
             PluginCommand::DiscordCheck {
                 application_id,
@@ -265,8 +295,7 @@ fn apk(path: &Path, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn dump(path: &Path, out: &Path, include_original: bool, json: bool) -> Result<()> {
-    let options = euphoria_dump::Options { include_original };
+fn dump(path: &Path, out: &Path, options: euphoria_dump::Options, json: bool) -> Result<()> {
     let progress = euphoria_dump::Progress::default();
     let summary = if euphoria_apk::is_apk(path) {
         let apk = euphoria_apk::Apk::open(path)?;
@@ -414,6 +443,73 @@ fn graph(path: &Path, target: &str, json: bool) -> Result<()> {
             edges.join(" ")
         );
     }
+    Ok(())
+}
+
+fn public_lookup(path: &Path, json: bool) -> Result<()> {
+    let analysis = Analysis::open(path)?;
+    let config = euphoria_community::Config::load();
+    let dump = euphoria_community::lookup(&config, &analysis.sha256)?;
+    if json {
+        return print_json(&dump);
+    }
+    match dump {
+        Some(dump) => println!(
+            "{} routines shared as {}, made with {}",
+            dump.functions.len(),
+            dump.file_name,
+            dump.tool
+        ),
+        None => println!("Nobody has shared {} yet", analysis.sha256),
+    }
+    Ok(())
+}
+
+fn plugin_market(json: bool) -> Result<()> {
+    let plugins = euphoria_community::fetch_index(&euphoria_community::Config::load())?;
+    if json {
+        return print_json(&plugins);
+    }
+    if plugins.is_empty() {
+        println!("No plugins have been published yet");
+    }
+    for plugin in plugins {
+        println!("{:<24} {:<8} {}", plugin.id, plugin.version, plugin.author);
+    }
+    Ok(())
+}
+
+fn plugin_install(id: &str) -> Result<()> {
+    let config = euphoria_community::Config::load();
+    let plugins = euphoria_community::fetch_index(&config)?;
+    let plugin = plugins
+        .iter()
+        .find(|plugin| plugin.id == id)
+        .with_context(|| format!("no plugin called {id} in the marketplace"))?;
+    let path = euphoria_community::install(&config, plugin, &euphoria_plugins::default_dir())?;
+    println!(
+        "Installed {} {} to {}. Turn it on under Plugins, Local.",
+        plugin.name,
+        plugin.version,
+        path.display()
+    );
+    Ok(())
+}
+
+fn plugin_index(repo: &Path) -> Result<()> {
+    let count = euphoria_community::build_index(repo)?;
+    println!("Wrote index.json with {count} plugins");
+    Ok(())
+}
+
+fn decompile(path: &Path, target: &str) -> Result<()> {
+    let analysis = Analysis::open(path)?;
+    let va = analysis
+        .resolve(target)
+        .with_context(|| format!("no address or routine called {target}"))?;
+    let listing = analysis.listing();
+    let output = euphoria_decompiler::Decompiler::new(&analysis, &listing).decompile_at(va)?;
+    print!("{}", output.text());
     Ok(())
 }
 

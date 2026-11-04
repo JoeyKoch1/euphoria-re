@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use eframe::egui::{self, FontId, Rect, RichText, Sense, Stroke, Ui};
 use euphoria_engine::{Cfg, EdgeKind, Function, GraphLayout, Line, TokenKind, layout};
 
@@ -125,7 +127,7 @@ fn clip(text: &str) -> String {
     format!("{clipped}…")
 }
 
-pub fn show(ui: &mut Ui, project: &mut Project) -> Option<Action> {
+pub fn show(ui: &mut Ui, project: &mut Project, live: Option<u64>) -> Option<Action> {
     let mut action = sidebar(ui, project);
 
     let cursor_va = project.listing.rows.get(project.cursor).map(|row| row.va);
@@ -149,6 +151,7 @@ pub fn show(ui: &mut Ui, project: &mut Project) -> Option<Action> {
 
     let cursor = project.cursor;
     let center = std::mem::take(&mut project.graph.center);
+    let breakpoints = project.breakpoints.clone();
     let Some(view) = project.graph.view.as_mut() else {
         return action;
     };
@@ -163,7 +166,7 @@ pub fn show(ui: &mut Ui, project: &mut Project) -> Option<Action> {
     }
 
     header(ui, view);
-    if let Some(next) = draw_canvas(ui, view, cursor, center) {
+    if let Some(next) = draw_canvas(ui, view, cursor, center, &breakpoints, live) {
         action = Some(next);
     }
     action
@@ -258,7 +261,14 @@ fn header(ui: &mut Ui, view: &mut View) {
         });
 }
 
-fn draw_canvas(ui: &mut Ui, view: &mut View, cursor: usize, center: bool) -> Option<Action> {
+fn draw_canvas(
+    ui: &mut Ui,
+    view: &mut View,
+    cursor: usize,
+    center: bool,
+    breakpoints: &BTreeSet<u64>,
+    live: Option<u64>,
+) -> Option<Action> {
     let rect = ui.available_rect_before_wrap();
     let response = ui.allocate_rect(rect, Sense::click_and_drag());
 
@@ -362,10 +372,18 @@ fn draw_canvas(ui: &mut Ui, view: &mut View, cursor: usize, center: bool) -> Opt
             if hit.double_clicked() {
                 action = Some(Action::Go(view.cfg.lines[at].va));
             }
-            if selected_line == Some(at) {
+            let line_va = view.cfg.lines[at].va;
+            if live == Some(line_va) {
+                painter.rect_filled(line_rect, 0.0, theme::CURRENT);
+            } else if selected_line == Some(at) {
                 painter.rect_filled(line_rect, 0.0, theme::SELECTED);
             } else if hit.hovered() {
                 painter.rect_filled(line_rect, 0.0, theme::HOVER);
+            }
+            if breakpoints.contains(&line_va) {
+                let bar =
+                    Rect::from_min_size(line_rect.min, egui::vec2(3.0 * zoom, line_rect.height()));
+                painter.rect_filled(bar, 0.0, theme::BREAKPOINT);
             }
 
             if let Some(target) = draw_line(ui, &painter, view, at, line_rect, &font) {

@@ -40,10 +40,22 @@ fn entropy_color(value: f32) -> egui::Color32 {
     }
 }
 
-fn card(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+pub fn card(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     egui::Frame::new()
         .inner_margin(egui::Margin::symmetric(14, 12))
         .show(ui, add);
+}
+
+// Hands an address to the default browser. Nothing in Euphoria signs in or uploads by itself.
+pub fn open_external(target: &str) {
+    let opener = if cfg!(windows) {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(opener).arg(target).spawn();
 }
 
 pub fn overview(ui: &mut Ui, project: &mut Project) -> Option<Action> {

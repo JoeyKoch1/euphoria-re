@@ -1,0 +1,14 @@
+[package]
+name = "euphoria-community"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+aero.workspace = true
+euphoria-engine.workspace = true
+euphoria-plugins.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true

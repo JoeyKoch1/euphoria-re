@@ -5,6 +5,7 @@ mod inspect;
 mod listing;
 mod patch;
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -38,6 +39,9 @@ pub struct Analysis {
     pub section_names: Vec<String>,
     pub import_count: usize,
     pub imports: Vec<String>,
+    pub iat: BTreeMap<u64, String>,
+    pub image_base: u64,
+    pub is_pe: bool,
     pub file_name: String,
     pub sha256: String,
     #[serde(skip)]
@@ -90,6 +94,9 @@ impl Analysis {
             section_names: image.section_names,
             import_count: image.imports.len(),
             imports: image.imports,
+            iat: image.iat,
+            image_base: image.image_base,
+            is_pe: image.is_pe,
             file_name,
             sha256: dataset::sha256_hex(&data),
             extras,
@@ -174,6 +181,18 @@ impl Analysis {
 
     pub fn listing(&self) -> Listing {
         Listing::build(&self.data, self.arch, &self.sections, &self.functions)
+    }
+
+    pub fn iat_name_is(&self, name: &str) -> bool {
+        self.iat.values().any(|import| import == name)
+    }
+
+    pub fn is_read_only(&self, va: u64) -> bool {
+        self.sections
+            .iter()
+            .zip(&self.section_names)
+            .find(|(section, _)| va >= section.va && va - section.va < section.size)
+            .is_some_and(|(_, name)| name.contains("rdata") || name.contains("rodata"))
     }
 
     pub fn function_at(&self, va: u64) -> Option<&Function> {

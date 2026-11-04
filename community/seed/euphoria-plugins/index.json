@@ -1,0 +1,33 @@
+{
+  "plugins": [
+    {
+      "id": "discord_presence",
+      "name": "Discord Presence",
+      "version": "2.0",
+      "author": "Euphoria",
+      "description": "Shows Euphoria, the open file's name, and the current tab on your Discord profile.",
+      "permissions": [
+        "discord"
+      ],
+      "sha256": "8712e2344e3f58b597744ba4093e5bea31403b2c26d1b08d9cd82917f72ad5da"
+    },
+    {
+      "id": "hello_tab",
+      "name": "Hello Tab",
+      "version": "1.0",
+      "author": "Euphoria",
+      "description": "Adds a tab that shows facts about the open file.",
+      "permissions": [],
+      "sha256": "7a3362690fe90a44589905fc898a57766a5f07fa18ede987cecbe7d71c7d4e95"
+    },
+    {
+      "id": "string_search",
+      "name": "String Search",
+      "version": "1.0",
+      "author": "Euphoria",
+      "description": "Adds a tab for finding strings and the code that uses them.",
+      "permissions": [],
+      "sha256": "f04af6080f265c511952b9b554af4e361034ef9b84e4439ef531cf0888bef2ae"
+    }
+  ]
+}

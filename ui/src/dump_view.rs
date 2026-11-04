@@ -36,6 +36,7 @@ struct Job {
 pub struct DumpState {
     asking: Option<Source>,
     skip_original: bool,
+    skip_decompile: bool,
     job: Option<Job>,
 }
 
@@ -67,6 +68,12 @@ impl DumpState {
             let mut include = !self.skip_original;
             ui.checkbox(&mut include, "Include the original file");
             self.skip_original = !include;
+            let mut decompile = !self.skip_decompile;
+            ui.checkbox(
+                &mut decompile,
+                "Include pseudocode for every routine (takes longer)",
+            );
+            self.skip_decompile = !decompile;
             ui.add_space(14.0);
 
             ui.horizontal(|ui| {
@@ -103,6 +110,7 @@ impl DumpState {
     fn start(&mut self, source: Source, path: &Path) {
         let options = Options {
             include_original: !self.skip_original,
+            decompile: !self.skip_decompile,
         };
         let progress = Arc::new(Progress::default());
         let shared = Arc::clone(&progress);

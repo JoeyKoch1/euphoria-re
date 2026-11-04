@@ -346,7 +346,7 @@ Build instructions, code style per language, how to add a file format or archite
 
 ### Model
 
-- Source: public on GitHub. Recommended split: the file parsers, database, CLI, and plugin API headers under Apache-2.0, so they can be reused and they build your reputation. The GUI and decompiler under a source-available license that permits personal use, study, and contribution, with a paid license required for the signed binaries and for professional use. Have a lawyer or a trusted licensing template (for example PolyForm) review the exact text before launch.
+- Source: public on GitHub under the PolyForm Noncommercial License 1.0.0. Personal and other noncommercial use is free, and commercial use needs a paid license. Have a lawyer review this before the paid launch.
 - Price: 20 USD, one time, one person, all 1.x releases. A 2.0 release may be a separate paid upgrade. Say that on the pricing page.
 - Free access: students and open source maintainers can request a free key. Source builds stay free for non-commercial use.
 - Sales platform: use a merchant of record such as Lemon Squeezy, Paddle, or Gumroad, so VAT and sales tax are handled for you. Check current fee tables. Fees of 8 to 10 percent on a 20 USD sale are a safe planning figure.
@@ -408,7 +408,7 @@ Fast replies on issues in the first month matter more than any ad. Aim for a fir
 
 Rule: every bracketed number gets replaced by a number from your own benchmark results. Delete any bullet you cannot back up with a measured figure.
 
-- Designed and built Euphoria, an open source x86-64 and ARM64 disassembler and decompiler workbench with a C++20 analysis core, a C database layer, Rust parsers and UI, and a stable C plugin ABI.
+- Designed and built Euphoria, a source-available x86-64 and ARM64 disassembler and decompiler workbench with a C++20 analysis core, a C database layer, Rust parsers and UI, and a stable C plugin ABI.
 - Reduced saved-analysis reopen time for a 50 MB PE to [X] ms by moving to a memory-mapped columnar database, compared with [Y] ms for [comparator] in a published, reproducible benchmark.
 - Built a parallel analysis scheduler that analyzes a [N] MB binary in [X] seconds on 8 cores and peaks at [Y]x the input size in memory, measured against DWARF and PDB ground truth with an F1 score of [Z] for function boundaries.
 - Wrote Rust parsers for PE, ELF, and Mach-O and fuzzed them with cargo-fuzz and libFuzzer; ran [N] billion executions and fixed [M] memory-safety and logic bugs before release.
@@ -871,3 +871,11 @@ Marketplace section: a placeholder for now, and it contacts nothing.
 When the repo exists, opening the Marketplace section fetches a signed `index.json` from GitHub. This is a deliberate exception to the offline default, and the user chose it. The request reveals an IP address to GitHub and nothing about the open file, and a setting turns it off. Each listing should pin a SHA-256 of the plugin file so a changed file fails to install, and installed plugins still start switched off.
 
 Next for the API, in order: writing names and comments back to the analysis, a graph widget, an HTTP permission that goes through Aero and asks per domain, and a stable version promise for `api_version` 1.
+
+## 17. Decompiler and debugger
+
+Both exist now in a first form, ahead of the original order, because they were the most requested pieces.
+
+The decompiler is its own crate. It goes from machine code through an intermediate form and SSA to structured pseudocode, and its check compares the behavior of recompiled output against the original build at several optimization levels. Next up are struct recovery, type propagation across calls, more import signatures, lifting common vector code, and ARM64.
+
+The debugger uses the Windows debug API on one worker thread. Next up are hardware breakpoints, attaching to a running process, editing registers and memory, a real call stack from unwind data, and a Linux backend.

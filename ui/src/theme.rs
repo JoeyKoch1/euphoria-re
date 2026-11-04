@@ -16,6 +16,11 @@ pub const MUTED: Color32 = Color32::from_rgb(0x8C, 0x8C, 0x8C);
 pub const ACCENT: Color32 = Color32::from_rgb(0x8F, 0xD0, 0x8F);
 pub const ERROR: Color32 = Color32::from_rgb(0xE0, 0x6C, 0x75);
 
+pub const BREAKPOINT: Color32 = Color32::from_rgb(0xE5, 0x4B, 0x4B);
+pub const CURRENT: Color32 = Color32::from_rgb(0x3B, 0x34, 0x1F);
+pub const CURRENT_MARK: Color32 = Color32::from_rgb(0xE5, 0xC0, 0x6B);
+pub const CODE_CALL: Color32 = Color32::from_rgb(0x82, 0xAA, 0xE8);
+
 pub const MNEMONIC: Color32 = Color32::from_rgb(0xB7, 0xA6, 0xDB);
 pub const CALL: Color32 = Color32::from_rgb(0x6C, 0xC4, 0xC4);
 pub const REGISTER: Color32 = Color32::from_rgb(0xE0, 0x7A, 0x80);

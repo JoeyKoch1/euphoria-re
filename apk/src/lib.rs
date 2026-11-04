@@ -120,7 +120,7 @@ pub fn is_apk(path: &Path) -> bool {
         && ZipArchive::new(file).is_ok_and(|archive| {
             archive
                 .file_names()
-                .any(|name| name == "AndroidManifest.xml")
+                .any(|name| name.is_ok_and(|name| name == "AndroidManifest.xml"))
         })
 }
 
@@ -162,7 +162,13 @@ impl Apk {
                     continue;
                 }
             };
-            let name = entry.name().to_owned();
+            let name = match entry.name() {
+                Ok(name) => name.into_owned(),
+                Err(error) => {
+                    apk.warnings.push(format!("Entry {index}: {error}"));
+                    continue;
+                }
+            };
             apk.files.push(FileEntry {
                 name: name.clone(),
                 size: entry.size(),
@@ -267,7 +273,9 @@ impl Apk {
             if entry.is_dir() {
                 continue;
             }
-            let name = entry.name().to_owned();
+            let Ok(name) = entry.name().map(|name| name.into_owned()) else {
+                continue;
+            };
             let mut bytes = Vec::new();
             if entry.take(MAX_ENTRY_BYTES).read_to_end(&mut bytes).is_ok() {
                 files.push((name, bytes));

@@ -1,13 +1,16 @@
 use std::collections::HashMap;
 use std::fs;
 use std::process::Command;
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, RichText, Ui};
+use euphoria_community::{Config, MarketPlugin, fetch_index, install};
 use euphoria_plugins::{PluginHost, UiEvent, Widget, default_dir};
 
 use crate::table::{self, Column, fill, fixed};
-use crate::{tabs, theme};
+use crate::{tabs, theme, tools};
 
 const TICK: Duration = Duration::from_secs(1);
 const LOCAL: [Column; 6] = [
@@ -18,6 +21,45 @@ const LOCAL: [Column; 6] = [
     fixed("State", 110.0),
     fixed("", 110.0),
 ];
+
+const MARKET: [Column; 5] = [
+    fill("Plugin"),
+    fixed("Version", 90.0),
+    fixed("Author", 150.0),
+    fixed("Extra access", 130.0),
+    fixed("", 130.0),
+];
+
+#[derive(Default)]
+struct Market {
+    config: Config,
+    job: Option<Receiver<Result<Vec<MarketPlugin>, String>>>,
+    install_job: Option<Receiver<Result<String, String>>>,
+    plugins: Option<Result<Vec<MarketPlugin>, String>>,
+}
+
+impl Market {
+    fn fetch(&mut self) {
+        let config = self.config.clone();
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = sender.send(fetch_index(&config).map_err(|error| format!("{error:#}")));
+        });
+        self.job = Some(receiver);
+    }
+
+    fn install(&mut self, plugin: MarketPlugin, dir: std::path::PathBuf) {
+        let config = self.config.clone();
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let outcome = install(&config, &plugin, &dir)
+                .map(|_| plugin.id)
+                .map_err(|error| format!("{error:#}"));
+            let _ = sender.send(outcome);
+        });
+        self.install_job = Some(receiver);
+    }
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Section {
@@ -33,6 +75,7 @@ pub struct PluginPage {
     queued: HashMap<(usize, usize), Vec<UiEvent>>,
     last_tick: Instant,
     message: Option<String>,
+    market: Market,
 }
 
 impl Default for PluginPage {
@@ -45,6 +88,10 @@ impl Default for PluginPage {
             queued: HashMap::new(),
             last_tick: Instant::now(),
             message: None,
+            market: Market {
+                config: Config::load(),
+                ..Market::default()
+            },
         }
     }
 }
@@ -148,27 +195,154 @@ pub fn show(ui: &mut Ui, page: &mut PluginPage) {
         });
 
     match page.section {
-        Section::Marketplace => marketplace(ui),
+        Section::Marketplace => marketplace(ui, page),
         Section::Local => local(ui, page),
     }
 }
 
-fn marketplace(ui: &mut Ui) {
-    ui.vertical_centered(|ui| {
-        ui.add_space(ui.available_height() / 2.0 - 50.0);
-        ui.label(
-            RichText::new("The marketplace is not connected yet")
-                .color(theme::MUTED)
-                .size(20.0),
-        );
-        ui.add_space(6.0);
-        ui.label(
-            RichText::new(
-                "It will list plugins from the Euphoria GitHub repo. Nothing is contacted for now.",
-            )
-            .color(theme::MUTED),
-        );
-    });
+fn poll_market(ui: &Ui, page: &mut PluginPage) {
+    if page.market.plugins.is_none() && page.market.job.is_none() {
+        page.market.fetch();
+    }
+    if let Some(job) = &page.market.job {
+        match job.try_recv() {
+            Ok(plugins) => {
+                page.market.plugins = Some(plugins);
+                page.market.job = None;
+            }
+            Err(_) => ui.ctx().request_repaint_after(Duration::from_millis(100)),
+        }
+    }
+    if let Some(job) = &page.market.install_job {
+        match job.try_recv() {
+            Ok(outcome) => {
+                page.market.install_job = None;
+                page.message = Some(match outcome {
+                    Ok(id) => finish_install(page, &id),
+                    Err(error) => error,
+                });
+            }
+            Err(_) => ui.ctx().request_repaint_after(Duration::from_millis(100)),
+        }
+    }
+}
+
+// A plugin always arrives switched off, so an update asks again in case it wants more access.
+fn finish_install(page: &mut PluginPage, id: &str) -> String {
+    let file = format!("{id}.lua");
+    let running = page
+        .host
+        .entries()
+        .iter()
+        .position(|entry| entry.meta.file == file && entry.enabled);
+    if let Some(index) = running {
+        page.host.set_enabled(index, false);
+    }
+    page.host.refresh();
+    format!("Installed {file}. Turn it on under Local.")
+}
+
+fn marketplace(ui: &mut Ui, page: &mut PluginPage) {
+    poll_market(ui, page);
+
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(12, 2))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(page.market.job.is_none(), egui::Button::new("Refresh"))
+                    .clicked()
+                {
+                    page.market.fetch();
+                }
+                if ui
+                    .button("Publish a plugin")
+                    .on_hover_text("Opens the plugin repo on GitHub, where you upload your file.")
+                    .clicked()
+                {
+                    tools::open_external(&page.market.config.plugin_upload_url());
+                }
+                ui.label(RichText::new(&page.market.config.plugin_repo).color(theme::MUTED));
+                if let Some(message) = &page.message {
+                    ui.label(RichText::new(message).color(theme::MUTED));
+                }
+            });
+        });
+
+    let plugins = match &page.market.plugins {
+        None => {
+            tabs::no_results(ui, "Loading the plugin list...");
+            return;
+        }
+        Some(Err(error)) => {
+            let message = format!("Could not load the plugin list. {error}");
+            tabs::no_results(ui, &message);
+            return;
+        }
+        Some(Ok(plugins)) if plugins.is_empty() => {
+            tabs::no_results(ui, "No plugins have been published yet");
+            return;
+        }
+        Some(Ok(plugins)) => plugins.clone(),
+    };
+
+    let mut chosen = None;
+    let busy = page.market.install_job.is_some();
+    let host = &page.host;
+    table::show(
+        ui,
+        "marketplace",
+        &MARKET,
+        plugins.len(),
+        None,
+        |ui, range, widths| {
+            for index in range {
+                let plugin = &plugins[index];
+                let row = table::row(ui, widths, false);
+                table::text(ui, row.cells[0], &plugin.name, theme::TEXT, theme::body());
+                if !plugin.description.is_empty() {
+                    tools::tip(ui, row.cells[0], ("market_tip", index), &plugin.description);
+                }
+                table::text(
+                    ui,
+                    row.cells[1],
+                    &plugin.version,
+                    theme::MUTED,
+                    theme::mono(),
+                );
+                table::text(
+                    ui,
+                    row.cells[2],
+                    &plugin.author,
+                    theme::MUTED,
+                    theme::body(),
+                );
+                let access = plugin.permissions.join(", ");
+                table::text(ui, row.cells[3], &access, theme::NUMBER, theme::body());
+
+                let file = format!("{}.lua", plugin.id);
+                let installed = host.entries().iter().find(|entry| entry.meta.file == file);
+                let (label, enabled) = match installed {
+                    Some(entry) if entry.meta.version == plugin.version => ("Installed", false),
+                    Some(_) => ("Update", !busy),
+                    None => ("Install", !busy),
+                };
+                let cell = row.cells[4].shrink2(egui::vec2(6.0, 1.0));
+                if ui
+                    .put(cell, egui::Button::new(label).small())
+                    .interact(egui::Sense::click())
+                    .clicked()
+                    && enabled
+                {
+                    chosen = Some(plugin.clone());
+                }
+            }
+        },
+    );
+    if let Some(plugin) = chosen {
+        let dir = page.host.dir().to_path_buf();
+        page.market.install(plugin, dir);
+    }
 }
 
 fn local(ui: &mut Ui, page: &mut PluginPage) {

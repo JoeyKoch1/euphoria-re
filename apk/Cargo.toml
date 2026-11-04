@@ -3,6 +3,7 @@ name = "euphoria-apk"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 euphoria-engine.workspace = true

@@ -12,6 +12,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
 use euphoria_apk::Apk;
+use euphoria_decompiler::Decompiler;
 use euphoria_engine::{Analysis, Cfg, Line, Listing, entropy, entropy_label, scan_xor};
 use serde::Serialize;
 use serde_json::json;
@@ -20,6 +21,7 @@ use zipfile::{ZipFile, compress};
 
 const DISASSEMBLY_CHUNK_ROWS: usize = 100_000;
 const GRAPH_CHUNK_FUNCTIONS: usize = 1_000;
+const DECOMPILED_CHUNK_FUNCTIONS: usize = 200;
 const CLASS_CHUNK: usize = 400;
 const FILE_CHUNK: usize = 200;
 const WRITE_BUFFER: usize = 1024 * 1024;
@@ -28,6 +30,7 @@ const QUEUE_PER_WORKER: usize = 4;
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
     pub include_original: bool,
+    pub decompile: bool,
 }
 
 #[derive(Debug, Default)]
@@ -157,6 +160,7 @@ base64.txt      Strings that decode from Base64
 links.txt       Links found in strings
 xor.txt         Text found by the single-byte XOR scan
 disassembly/    The full listing
+decompiled/     C-like pseudocode of every routine
 graphs/         Control flow graph of every routine, as JSON lines
 original/       The file itself, when included
 ";
@@ -204,6 +208,31 @@ fn disassembly_chunk(
     entry(format!("disassembly/{part:05}.txt"), text)
 }
 
+fn decompiled_chunk(
+    part: usize,
+    functions: &[euphoria_engine::Function],
+    decompiler: &Decompiler<'_>,
+) -> Entry {
+    let mut text = String::new();
+    for function in functions {
+        match decompiler.decompile(function) {
+            Ok(output) => {
+                let _ = writeln!(text, "// {:#x}", function.va);
+                text.push_str(&output.text());
+                text.push('\n');
+            }
+            Err(error) => {
+                let _ = writeln!(
+                    text,
+                    "// {:#x}: could not decompile: {error:#}\n",
+                    function.va
+                );
+            }
+        }
+    }
+    entry(format!("decompiled/{part:05}.c"), text)
+}
+
 fn graph_chunk(
     part: usize,
     functions: &[euphoria_engine::Function],
@@ -239,6 +268,8 @@ pub fn dump_binary(
     options: Options,
     progress: &Progress,
 ) -> Result<Summary> {
+    let decompiler = Decompiler::new(analysis, listing);
+    let decompiler = &decompiler;
     let mut jobs: Vec<Job<'_>> = Vec::new();
 
     jobs.push(Box::new(|| Ok(vec![entry("README.txt", BINARY_README)])));
@@ -335,6 +366,17 @@ pub fn dump_binary(
         }));
         start = end;
         part += 1;
+    }
+    if options.decompile {
+        for (index, functions) in analysis
+            .functions
+            .chunks(DECOMPILED_CHUNK_FUNCTIONS)
+            .enumerate()
+        {
+            jobs.push(Box::new(move || {
+                Ok(vec![decompiled_chunk(index, functions, decompiler)])
+            }));
+        }
     }
     for (index, functions) in analysis.functions.chunks(GRAPH_CHUNK_FUNCTIONS).enumerate() {
         jobs.push(Box::new(move || {
@@ -559,7 +601,10 @@ mod tests {
 
     fn read_names(path: &Path) -> Vec<String> {
         let archive = zip::ZipArchive::new(File::open(path).unwrap()).unwrap();
-        archive.file_names().map(str::to_owned).collect()
+        archive
+            .file_names()
+            .map(|name| name.unwrap().into_owned())
+            .collect()
     }
 
     fn read_text(path: &Path, name: &str) -> String {
@@ -591,6 +636,7 @@ mod tests {
             &out,
             Options {
                 include_original: true,
+                decompile: true,
             },
             &progress,
         )
@@ -647,6 +693,7 @@ mod tests {
             &out,
             Options {
                 include_original: false,
+                decompile: true,
             },
             &Progress::default(),
         )
@@ -673,7 +720,8 @@ mod tests {
                 &listing,
                 bad,
                 Options {
-                    include_original: false
+                    include_original: false,
+                    decompile: true,
                 },
                 &Progress::default(),
             )

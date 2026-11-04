@@ -3,6 +3,7 @@ name = "euphoria-cli"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [[bin]]
 name = "eu"
@@ -11,6 +12,8 @@ path = "src/main.rs"
 [dependencies]
 aero.workspace = true
 euphoria-apk.workspace = true
+euphoria-community.workspace = true
+euphoria-decompiler.workspace = true
 euphoria-dump.workspace = true
 euphoria-engine.workspace = true
 euphoria-plugins.workspace = true

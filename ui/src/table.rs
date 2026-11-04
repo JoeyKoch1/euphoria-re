@@ -48,8 +48,19 @@ pub fn show(
     scroll_to: Option<usize>,
     body: impl FnOnce(&mut Ui, Range<usize>, &Widths),
 ) {
+    header(ui, columns);
+    body_rows(ui, id, columns, count, scroll_to, body);
+}
+
+pub fn body_rows(
+    ui: &mut Ui,
+    id: &str,
+    columns: &[Column],
+    count: usize,
+    scroll_to: Option<usize>,
+    body: impl FnOnce(&mut Ui, Range<usize>, &Widths),
+) {
     let widths = resolve(columns, ui.available_width());
-    header(ui, columns, &widths);
 
     let mut area = egui::ScrollArea::vertical().id_salt(id).auto_shrink(false);
     if let Some(index) = scroll_to {
@@ -102,7 +113,8 @@ fn cells(rect: Rect, widths: &Widths) -> Vec<Rect> {
         .collect()
 }
 
-fn header(ui: &mut Ui, columns: &[Column], widths: &Widths) {
+pub fn header(ui: &mut Ui, columns: &[Column]) {
+    let widths = &resolve(columns, ui.available_width());
     let size = egui::vec2(ui.available_width(), HEADER_HEIGHT);
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     ui.painter().rect_filled(rect, 0.0, theme::HEADER);
@@ -112,14 +124,25 @@ fn header(ui: &mut Ui, columns: &[Column], widths: &Widths) {
 }
 
 pub fn row(ui: &mut Ui, widths: &Widths, selected: bool) -> Row {
+    code_row(ui, widths, selected, false, false)
+}
+
+pub fn marker(ui: &Ui, rect: Rect, color: Color32) {
+    let bar = Rect::from_min_size(rect.min, egui::vec2(MARKER_WIDTH, rect.height()));
+    ui.painter().rect_filled(bar, 0.0, color);
+}
+
+// `flagged` is a breakpoint, whose red bar stays put after the selection moves on. `live` is the
+// instruction a paused program would run next.
+pub fn code_row(ui: &mut Ui, widths: &Widths, selected: bool, flagged: bool, live: bool) -> Row {
     let size = egui::vec2(ui.available_width(), ROW_HEIGHT);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
 
     let painter = ui.painter();
-    if selected {
+    if live {
+        painter.rect_filled(rect, 0.0, theme::CURRENT);
+    } else if selected {
         painter.rect_filled(rect, 0.0, theme::SELECTED);
-        let marker = Rect::from_min_size(rect.min, egui::vec2(MARKER_WIDTH, rect.height()));
-        painter.rect_filled(marker, 0.0, theme::ACCENT);
     } else if response.hovered() {
         painter.rect_filled(rect, 0.0, theme::HOVER);
     }
@@ -128,6 +151,11 @@ pub fn row(ui: &mut Ui, widths: &Widths, selected: bool) -> Row {
         rect.bottom(),
         Stroke::new(1.0, theme::BORDER),
     );
+    if flagged {
+        marker(ui, rect, theme::BREAKPOINT);
+    } else if selected {
+        marker(ui, rect, theme::ACCENT);
+    }
 
     Row {
         cells: cells(rect, widths),

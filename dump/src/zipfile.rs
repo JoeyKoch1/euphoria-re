@@ -361,8 +361,14 @@ mod tests {
 
     #[test]
     fn stores_data_that_will_not_compress() {
-        let random: Vec<u8> = (0..4096u32)
-            .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let random: Vec<u8> = (0..4096)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 32) as u8
+            })
             .collect();
         let packed = compress("r".to_owned(), random.clone()).unwrap();
         assert_eq!(packed.method, METHOD_STORED);
@@ -370,6 +376,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(debug_assertions, ignore = "takes minutes without optimizations")]
     fn handles_more_entries_than_a_plain_zip_allows() {
         let count = 70_000usize;
         let mut out = Vec::new();
@@ -400,11 +407,14 @@ mod tests {
         zip.finish().unwrap();
 
         let archive = read_back(out);
-        let mut names: Vec<&str> = archive.file_names().collect();
+        let mut names: Vec<String> = archive
+            .file_names()
+            .map(|name| name.unwrap().into_owned())
+            .collect();
         names.sort_unstable();
         assert_eq!(
             names,
-            ["smali/a.smali", "smali/a~2.smali", "smali/a~3.smali"]
+            ["smali/A~2.smali", "smali/a.smali", "smali/a~3.smali"]
         );
     }
 

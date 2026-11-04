@@ -1,16 +1,20 @@
 mod advanced;
 mod apk_view;
 mod canvas;
+mod debug_view;
+mod decompile_view;
 mod dump_view;
 mod graph_view;
 mod network;
 mod plugin_view;
+mod public_view;
 mod sql_view;
 mod table;
 mod tabs;
 mod theme;
 mod tools;
 
+use std::collections::BTreeSet;
 use std::env;
 use std::path::Path;
 use std::sync::Arc;
@@ -21,10 +25,13 @@ use euphoria_plugins::{BinaryView, Request};
 
 use advanced::Hypervisor;
 use apk_view::ApkView;
+use debug_view::{DebugState, Notice};
+use decompile_view::DecompileState;
 use dump_view::{DumpState, Source};
 use graph_view::GraphState;
 use network::NetworkState;
 use plugin_view::PluginPage;
+use public_view::PublicState;
 use sql_view::SqlView;
 use tabs::Filter;
 use tools::XorState;
@@ -38,6 +45,8 @@ enum Tab {
     #[default]
     Listing,
     Graph,
+    Decompiler,
+    Debugger,
     Routines,
     Xrefs,
     Strings,
@@ -56,9 +65,11 @@ enum Tab {
 }
 
 impl Tab {
-    const MAIN: [(Self, &'static str); 10] = [
+    const MAIN: [(Self, &'static str); 12] = [
         (Self::Listing, "Listing"),
         (Self::Graph, "Graph"),
+        (Self::Decompiler, "Decompiler"),
+        (Self::Debugger, "Debugger"),
         (Self::Routines, "Routines"),
         (Self::Xrefs, "Xrefs"),
         (Self::Strings, "Strings"),
@@ -78,6 +89,9 @@ struct Project {
     references: Filter,
     strings: Filter,
     graph: GraphState,
+    decompile: DecompileState,
+    public: PublicState,
+    breakpoints: BTreeSet<u64>,
     xor: XorState,
     inspection: Inspection,
     cursor: usize,
@@ -96,6 +110,9 @@ impl Project {
             references: Filter::all(listing.xrefs.len()),
             strings: Filter::all(listing.strings.len()),
             graph: GraphState::new(analysis.functions.len()),
+            decompile: DecompileState::default(),
+            public: PublicState::new(&analysis.sha256),
+            breakpoints: BTreeSet::new(),
             xor: XorState::default(),
             inspection: analysis.inspect(),
             cursor: entry,
@@ -121,6 +138,7 @@ struct App {
     sql: Option<SqlView>,
     apk: Option<ApkView>,
     dump: DumpState,
+    debug: DebugState,
     network: NetworkState,
     hypervisor: Hypervisor,
     plugins: PluginPage,
@@ -166,6 +184,7 @@ impl App {
             return;
         }
 
+        self.debug.close();
         match Project::open(path) {
             Ok(project) => {
                 self.network.load_links(&project.listing);
@@ -273,6 +292,89 @@ impl App {
             project.scroll_to = Some(row);
             project.graph.center_on_cursor();
             self.status = None;
+        }
+    }
+
+    fn debug_keys(&mut self, ctx: &egui::Context) {
+        let code_tab = matches!(
+            self.tab,
+            Tab::Listing | Tab::Graph | Tab::Decompiler | Tab::Debugger
+        );
+        if !code_tab || ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let Some(project) = &mut self.project else {
+            return;
+        };
+
+        let (shift, pressed) = ctx.input(|input| {
+            let keys = [
+                egui::Key::F2,
+                egui::Key::F4,
+                egui::Key::F5,
+                egui::Key::F7,
+                egui::Key::F8,
+                egui::Key::F9,
+            ]
+            .map(|key| input.key_pressed(key));
+            (input.modifiers.shift, keys)
+        });
+        let [breakpoint, run_to, decompile, into, over, run] = pressed;
+        let cursor = project.listing.rows.get(project.cursor).map(|row| row.va);
+
+        if breakpoint && let Some(va) = cursor {
+            self.debug.toggle_breakpoint(project, va);
+        }
+        if decompile {
+            self.tab = if self.tab == Tab::Decompiler {
+                Tab::Listing
+            } else {
+                Tab::Decompiler
+            };
+            project.scroll_to = Some(project.cursor);
+        }
+
+        let mut problem = None;
+        if run {
+            problem = self.debug.run(project);
+        }
+        if into {
+            problem = self.debug.step_into(project);
+        }
+        if over {
+            problem = if shift {
+                self.debug.step_out(project)
+            } else {
+                self.debug.step_over(project)
+            };
+        }
+        if run_to
+            && self.debug.is_stopped()
+            && let Some(va) = cursor
+        {
+            problem = self.debug.run_to(project, va);
+        }
+        if problem.is_some() {
+            self.status = problem;
+        }
+    }
+
+    fn poll_debugger(&mut self, ctx: &egui::Context) {
+        for notice in self.debug.poll(ctx) {
+            match notice {
+                Notice::Stopped { image_ip, message } => {
+                    self.status = Some(message);
+                    let inside = self
+                        .project
+                        .as_ref()
+                        .and_then(|project| project.analysis.function_containing(image_ip))
+                        .is_some();
+                    if inside {
+                        self.focus(image_ip);
+                    }
+                }
+                Notice::Message(message) => self.status = Some(message),
+            }
         }
     }
 
@@ -530,14 +632,20 @@ impl App {
                     self.empty_state(ui);
                     return;
                 };
+                let live = self.debug.current_image_ip();
                 match tab {
-                    Tab::Graph => graph_view::show(ui, project),
+                    Tab::Graph => graph_view::show(ui, project, live),
+                    Tab::Decompiler => decompile_view::show(ui, project, &mut self.debug),
+                    Tab::Debugger => debug_view::show(ui, project, &mut self.debug),
                     Tab::Routines => tabs::functions(ui, project),
                     Tab::Xrefs => tabs::references(ui, project),
                     Tab::Strings => tabs::strings(ui, project),
                     Tab::Xor => tools::xor_tab(ui, project),
-                    Tab::File => tools::overview(ui, project),
-                    _ => tabs::disassembly(ui, project),
+                    Tab::File => {
+                        let shared = public_view::show(ui, project);
+                        tools::overview(ui, project).or(shared)
+                    }
+                    _ => tabs::disassembly(ui, project, &mut self.debug),
                 }
             }
         };
@@ -553,6 +661,7 @@ impl App {
             Some(tabs::Action::Status(message)) => self.status = Some(message),
             Some(tabs::Action::Open(path)) => self.open(&path),
             Some(tabs::Action::ShowHost(index)) => self.tab = Tab::Host(index),
+            Some(tabs::Action::ShowDecompiler) => self.tab = Tab::Decompiler,
             None => {}
         }
     }
@@ -569,6 +678,8 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.network.poll(&ctx);
         self.plugins.poll(&ctx);
+        self.poll_debugger(&ctx);
+        self.debug_keys(&ctx);
         if !ctx.egui_wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
             self.toggle_graph();
         }
@@ -589,6 +700,7 @@ impl eframe::App for App {
         self.network.consent_dialog(&ctx);
         self.plugins.confirm_dialog(&ctx);
         self.dump.dialog(&ctx);
+        self.debug.dialog(&ctx, self.project.as_ref());
         if let Some(line) = self.dump.poll(&ctx) {
             self.status = Some(line);
         }

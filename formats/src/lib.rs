@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use euphoria_capi::{Arch, ImageView, Section};
 use object::pe::IMAGE_SCN_MEM_EXECUTE;
+use object::read::pe::{ImageNtHeaders, ImageThunkData, PeFile};
 use object::{
     Architecture, ExportTarget, NameOrOrdinal, Object, ObjectSection, ObjectSymbol, SectionFlags,
     SectionKind,
@@ -22,6 +23,10 @@ pub struct Image<'a> {
     pub sections: Vec<Section>,
     pub section_names: Vec<String>,
     pub imports: Vec<String>,
+    // Where the loader stores each imported address, so a call through one can be named.
+    pub iat: BTreeMap<u64, String>,
+    pub image_base: u64,
+    pub is_pe: bool,
     pub symbols: BTreeMap<u64, String>,
     seeds: Vec<u64>,
 }
@@ -69,12 +74,15 @@ pub fn parse(data: &[u8]) -> Result<Image<'_>, Error> {
         .imports()
         .into_iter()
         .flatten()
+        .flatten()
         .map(|import| {
-            format!(
-                "{}!{}",
-                String::from_utf8_lossy(import.library()),
-                String::from_utf8_lossy(import.name())
-            )
+            let library = String::from_utf8_lossy(import.library());
+            match import.name() {
+                NameOrOrdinal::Name(name) => {
+                    format!("{library}!{}", String::from_utf8_lossy(name))
+                }
+                NameOrOrdinal::Ordinal(ordinal) => format!("{library}!#{ordinal}"),
+            }
         })
         .collect();
 
@@ -97,9 +105,19 @@ pub fn parse(data: &[u8]) -> Result<Image<'_>, Error> {
         }
     }
 
+    let iat = match &file {
+        object::File::Pe32(pe) => import_slots(pe),
+        object::File::Pe64(pe) => import_slots(pe),
+        _ => BTreeMap::new(),
+    };
+    let is_pe = matches!(file, object::File::Pe32(_) | object::File::Pe64(_));
+
     Ok(Image {
         data,
         arch,
+        iat,
+        image_base: file.relative_address_base(),
+        is_pe,
         entry: file.entry(),
         sections,
         section_names,
@@ -107,6 +125,45 @@ pub fn parse(data: &[u8]) -> Result<Image<'_>, Error> {
         seeds: symbols.keys().copied().collect(),
         symbols,
     })
+}
+
+fn import_slots<Pe: ImageNtHeaders>(file: &PeFile<'_, Pe>) -> BTreeMap<u64, String> {
+    let mut slots = BTreeMap::new();
+    let Ok(Some(table)) = file.import_table() else {
+        return slots;
+    };
+    let Ok(mut descriptors) = table.descriptors() else {
+        return slots;
+    };
+    let base = file.relative_address_base();
+    let width = if file.is_64() { 8 } else { 4 };
+    while let Ok(Some(descriptor)) = descriptors.next() {
+        let library = table
+            .name(descriptor.name.get(object::LittleEndian))
+            .map(String::from_utf8_lossy)
+            .unwrap_or_default();
+        let first = descriptor.first_thunk.get(object::LittleEndian);
+        let original = descriptor.original_first_thunk.get(object::LittleEndian);
+        let source = if original != 0 { original } else { first };
+        let Ok(mut thunks) = table.thunks(source) else {
+            continue;
+        };
+        let mut slot = base + u64::from(first);
+        while let Ok(Some(thunk)) = thunks.next::<Pe>() {
+            let name = if thunk.is_ordinal() {
+                format!("{library}!#{}", thunk.ordinal())
+            } else {
+                let name = table
+                    .hint_name(thunk.address())
+                    .map(|(_, name)| String::from_utf8_lossy(name).into_owned())
+                    .unwrap_or_default();
+                format!("{library}!{name}")
+            };
+            slots.insert(slot, name);
+            slot += width;
+        }
+    }
+    slots
 }
 
 fn is_executable<'data>(section: &impl ObjectSection<'data>) -> bool {

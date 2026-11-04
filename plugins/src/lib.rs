@@ -234,6 +234,7 @@ impl PluginHost {
 
     // Reads the plugin folder again. Running plugins restart, so edits to their files take effect.
     pub fn refresh(&mut self) {
+        self.upgrade_examples();
         let enabled = self.read_enabled();
         self.entries.clear();
 
@@ -307,6 +308,16 @@ impl PluginHost {
             self.requests.push(Request::Status(format!(
                 "Could not save the plugin list: {error}"
             )));
+        }
+    }
+
+    // Copies we shipped earlier get replaced on their own. Nothing new gets added here.
+    fn upgrade_examples(&self) {
+        for (file, source) in EXAMPLES {
+            let path = self.dir.join(file);
+            if path.exists() && example_is_outdated(&path, source, file) {
+                let _ = fs::write(path, source);
+            }
         }
     }
 
@@ -603,6 +614,28 @@ mod tests {
         host.set_enabled(0, true);
         host.emit_tab_changed("Strings");
         assert_eq!(host.entries()[0].log(), ["Graph", "Strings Strings"]);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn older_shipped_examples_upgrade_when_the_folder_opens() {
+        let dir = scratch("opens-upgraded");
+        fs::create_dir_all(&dir).unwrap();
+        let old = "-- @name Discord Presence\n-- @version 1.0\n-- @author Euphoria\n";
+        fs::write(dir.join("discord_presence.lua"), old).unwrap();
+        let mine = "-- @name String Search\n-- @version 9.9\n-- @author Someone\n";
+        fs::write(dir.join("string_search.lua"), mine).unwrap();
+
+        let _host = PluginHost::open(dir.clone());
+
+        let upgraded = fs::read_to_string(dir.join("discord_presence.lua")).unwrap();
+        assert!(!upgraded.contains("button"));
+        assert_ne!(upgraded, old);
+        assert_eq!(
+            fs::read_to_string(dir.join("string_search.lua")).unwrap(),
+            mine
+        );
+        assert!(!dir.join("hello_tab.lua").exists());
         let _ = fs::remove_dir_all(dir);
     }
 

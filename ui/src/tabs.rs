@@ -3,6 +3,7 @@ use std::ops::Range;
 use eframe::egui::{self, Color32, Rect, RichText, Sense, Stroke, Ui};
 use euphoria_engine::{Function, Line, StringEntry, TokenKind, XrefKind};
 
+use crate::debug_view::{self, DebugState};
 use crate::table::{self, Column, fill, fixed};
 use crate::{Project, theme, tools};
 
@@ -44,6 +45,7 @@ pub enum Action {
     Status(String),
     Open(std::path::PathBuf),
     ShowHost(usize),
+    ShowDecompiler,
 }
 
 pub struct Filter {
@@ -97,7 +99,7 @@ impl Filter {
     }
 }
 
-pub fn disassembly(ui: &mut Ui, project: &mut Project) -> Option<Action> {
+pub fn disassembly(ui: &mut Ui, project: &mut Project, debug: &mut DebugState) -> Option<Action> {
     if project.listing.rows.is_empty() {
         no_results(
             ui,
@@ -106,11 +108,13 @@ pub fn disassembly(ui: &mut Ui, project: &mut Project) -> Option<Action> {
         return None;
     }
 
-    let mut action = None;
+    table::header(ui, &DISASSEMBLY);
+    let mut action = debug_view::controls(ui, project, debug);
     let scroll_to = project.scroll_to.take();
     let count = project.listing.rows.len();
+    let live = debug.current_image_ip();
 
-    table::show(
+    table::body_rows(
         ui,
         "disassembly",
         &DISASSEMBLY,
@@ -124,9 +128,19 @@ pub fn disassembly(ui: &mut Ui, project: &mut Project) -> Option<Action> {
             let mut centers = Vec::with_capacity(lines.len());
 
             for (index, line) in range.clone().zip(&lines) {
-                let row = table::row(ui, widths, index == project.cursor);
+                let flagged = project.breakpoints.contains(&line.va);
+                let row = table::code_row(
+                    ui,
+                    widths,
+                    index == project.cursor,
+                    flagged,
+                    live == Some(line.va),
+                );
                 if row.response.clicked() {
                     project.cursor = index;
+                }
+                if row.response.double_clicked() {
+                    debug.toggle_breakpoint(project, line.va);
                 }
 
                 flow_cell = Some(row.cells[0]);
@@ -234,6 +248,9 @@ pub fn comment(project: &Project, line: &Line) -> Option<String> {
     }
     if let Some(entry) = line.data.and_then(|va| project.listing.string_at(va)) {
         return Some(format!("\"{}\"", entry.value));
+    }
+    if let Some(import) = line.data.and_then(|va| project.analysis.iat.get(&va)) {
+        return Some(import.clone());
     }
     name_at(line.va)
 }
