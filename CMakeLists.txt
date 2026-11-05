@@ -30,3 +30,4 @@ enable_testing()
 add_executable(scan_test EXCLUDE_FROM_ALL simd/scan_test.c)
 target_link_libraries(scan_test PRIVATE eu_simd)
 add_test(NAME scan_test COMMAND scan_test)
+Cwel
