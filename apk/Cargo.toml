@@ -6,6 +6,7 @@ publish.workspace = true
 license.workspace = true
 
 [dependencies]
+euphoria-decompiler.workspace = true
 euphoria-engine.workspace = true
 anyhow.workspace = true
 serde.workspace = true

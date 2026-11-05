@@ -1,4 +1,5 @@
 mod ir;
+pub mod java_strings;
 mod lift;
 mod print;
 mod ssa;

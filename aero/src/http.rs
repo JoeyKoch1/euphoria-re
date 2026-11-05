@@ -84,20 +84,21 @@ pub fn send(request: &Request) -> Result<Capture, Error> {
     let port = url.port.or(url.default_port()).unwrap_or(80);
     let stream = connect(&url.host, port)?;
     let head = build_request(request, &url, port);
+    let head_only = request.method.eq_ignore_ascii_case("HEAD");
 
     let raw = if url.scheme == "https" {
         let mut tls = tls_stream(stream, &url.host)?;
         tls.write_all(&head)?;
         tls.flush()?;
-        read_all(&mut tls)?
+        read_all(&mut tls, head_only)?
     } else {
         let mut stream = stream;
         stream.write_all(&head)?;
         stream.flush()?;
-        read_all(&mut stream)?
+        read_all(&mut stream, head_only)?
     };
 
-    let response = parse_response(&raw)?;
+    let response = parse_response_for(&raw, head_only)?;
     Ok(Capture::new(request, &response, started.elapsed()))
 }
 
@@ -188,16 +189,38 @@ fn build_request(request: &Request, url: &Url, port: u16) -> Vec<u8> {
     bytes
 }
 
-fn read_all(stream: &mut impl Read) -> Result<Vec<u8>, Error> {
-    let mut raw = Vec::new();
-    match stream.take(MAX_RESPONSE_BYTES).read_to_end(&mut raw) {
-        Ok(_) => Ok(raw),
-        Err(error) if error.kind() == ErrorKind::UnexpectedEof && !raw.is_empty() => Ok(raw),
-        Err(error) => Err(error.into()),
-    }
+fn read_all(stream: &mut impl Read, head_only: bool) -> Result<Vec<u8>, Error> {
+    read_limited(stream, MAX_RESPONSE_BYTES, head_only)
 }
 
-pub(crate) fn parse_response(raw: &[u8]) -> Result<Response, Error> {
+fn read_limited(stream: &mut impl Read, limit: u64, head_only: bool) -> Result<Vec<u8>, Error> {
+    let mut raw = Vec::new();
+    match stream.take(limit + 1).read_to_end(&mut raw) {
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::UnexpectedEof && !raw.is_empty() => {
+            let response = parse_response_for(&raw, head_only)?;
+            if !head_only
+                && !matches!(response.status, 100..=199 | 204 | 304)
+                && response.header("Content-Length").is_none()
+                && response.header("Transfer-Encoding").is_none()
+            {
+                return Err(Error::IncompleteResponse);
+            }
+        }
+        Err(error) => return Err(error.into()),
+    }
+    if raw.len() as u64 > limit {
+        return Err(Error::ResponseTooLarge);
+    }
+    Ok(raw)
+}
+
+#[cfg(test)]
+fn parse_response(raw: &[u8]) -> Result<Response, Error> {
+    parse_response_for(raw, false)
+}
+
+fn parse_response_for(raw: &[u8], head_only: bool) -> Result<Response, Error> {
     let split = raw
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -227,18 +250,24 @@ pub(crate) fn parse_response(raw: &[u8]) -> Result<Response, Error> {
         headers,
         body: Vec::new(),
     };
+    if head_only || matches!(status, 100..=199 | 204 | 304) {
+        return Ok(response);
+    }
 
     let chunked = response
         .header("Transfer-Encoding")
         .is_some_and(|value| value.to_ascii_lowercase().contains("chunked"));
     let length = response
         .header("Content-Length")
-        .and_then(|value| value.parse::<usize>().ok());
+        .map(|value| value.parse::<usize>().map_err(|_| Error::BadResponse))
+        .transpose()?;
 
     response.body = if chunked {
         decode_chunked(body)?
     } else if let Some(length) = length {
-        body[..length.min(body.len())].to_vec()
+        body.get(..length)
+            .ok_or(Error::IncompleteResponse)?
+            .to_vec()
     } else {
         body.to_vec()
     };
@@ -256,6 +285,12 @@ fn decode_chunked(mut body: &[u8]) -> Result<Vec<u8>, Error> {
         let size = size.split(';').next().unwrap_or("").trim();
         let size = usize::from_str_radix(size, 16).map_err(|_| Error::BadResponse)?;
         if size == 0 {
+            let trailers = &body[line_end + 2..];
+            if !trailers.starts_with(b"\r\n")
+                && !trailers.windows(4).any(|part| part == b"\r\n\r\n")
+            {
+                return Err(Error::IncompleteResponse);
+            }
             return Ok(decoded);
         }
 
@@ -265,6 +300,9 @@ fn decode_chunked(mut body: &[u8]) -> Result<Vec<u8>, Error> {
             .filter(|&end| end <= body.len())
             .ok_or(Error::BadResponse)?;
         decoded.extend_from_slice(&body[start..end]);
+        if body.get(end..end + 2) != Some(b"\r\n") {
+            return Err(Error::IncompleteResponse);
+        }
         body = body.get(end + 2..).ok_or(Error::BadResponse)?;
     }
 }
@@ -272,6 +310,33 @@ fn decode_chunked(mut body: &[u8]) -> Result<Vec<u8>, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_incomplete_and_oversized_responses() {
+        assert!(matches!(
+            parse_response(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nabc"),
+            Err(Error::IncompleteResponse)
+        ));
+        assert!(parse_response(b"HTTP/1.1 200 OK\r\nContent-Length: bad\r\n\r\nabc").is_err());
+        assert!(matches!(
+            read_limited(&mut &b"abcd"[..], 3, false),
+            Err(Error::ResponseTooLarge)
+        ));
+        assert_eq!(read_limited(&mut &b"abc"[..], 3, false).unwrap(), b"abc");
+        assert!(
+            parse_response_for(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n", true)
+                .unwrap()
+                .body
+                .is_empty()
+        );
+        assert!(
+            parse_response(b"HTTP/1.1 304 Not Modified\r\nContent-Length: 5\r\n\r\n")
+                .unwrap()
+                .body
+                .is_empty()
+        );
+        assert!(decode_chunked(b"1\r\na\r\n0\r\n").is_err());
+    }
 
     #[test]
     fn parses_a_plain_response() {

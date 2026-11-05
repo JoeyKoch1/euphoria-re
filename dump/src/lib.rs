@@ -1,7 +1,6 @@
 mod zipfile;
 
 use std::fmt::Write as _;
-use std::fs::{self, File};
 use std::io::BufWriter;
 use std::path::Path;
 use std::sync::Mutex;
@@ -10,7 +9,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Instant;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use euphoria_apk::Apk;
 use euphoria_decompiler::Decompiler;
 use euphoria_engine::{Analysis, Cfg, Line, Listing, entropy, entropy_label, scan_xor};
@@ -23,7 +22,6 @@ const DISASSEMBLY_CHUNK_ROWS: usize = 100_000;
 const GRAPH_CHUNK_FUNCTIONS: usize = 1_000;
 const DECOMPILED_CHUNK_FUNCTIONS: usize = 200;
 const CLASS_CHUNK: usize = 400;
-const FILE_CHUNK: usize = 200;
 const WRITE_BUFFER: usize = 1024 * 1024;
 const QUEUE_PER_WORKER: usize = 4;
 
@@ -70,12 +68,23 @@ fn one_line(text: &str) -> String {
     text.replace('\r', "\\r").replace('\n', "\\n")
 }
 
-fn run_jobs(jobs: Vec<Job<'_>>, out: &Path, progress: &Progress) -> Result<Summary> {
+fn run_jobs(
+    jobs: Vec<Job<'_>>,
+    out: &Path,
+    progress: &Progress,
+    apk: Option<&Apk>,
+) -> Result<Summary> {
     let started = Instant::now();
-    let temporary = out.with_extension("zip.tmp");
-    let file = File::create(&temporary)
-        .with_context(|| format!("cannot write {}", temporary.display()))?;
-    let mut zip = ZipFile::new(BufWriter::with_capacity(WRITE_BUFFER, file));
+    let parent = out
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("cannot write {}", out.display()))?;
+    let mut zip = ZipFile::new(BufWriter::with_capacity(
+        WRITE_BUFFER,
+        temporary.as_file_mut(),
+    ));
 
     let workers = thread::available_parallelism().map_or(4, usize::from);
     let queue = Mutex::new(jobs);
@@ -133,12 +142,30 @@ fn run_jobs(jobs: Vec<Job<'_>>, out: &Path, progress: &Progress) -> Result<Summa
     });
 
     if let Some(error) = failure {
-        let _ = fs::remove_file(&temporary);
         return Err(error);
     }
 
+    if let Some(apk) = apk {
+        let mut add = |name: &str, size: u64, reader: &mut dyn std::io::Read| -> Result<()> {
+            let written = zip.add_reader(name, size, reader)?;
+            uncompressed += size;
+            progress.files.fetch_add(1, Ordering::Relaxed);
+            progress.bytes.fetch_add(written, Ordering::Relaxed);
+            Ok(())
+        };
+        add(
+            &format!("original/{}", apk.file_name),
+            apk.data.len() as u64,
+            &mut apk.data.as_slice(),
+        )?;
+        apk.for_each_file(|name, size, reader| add(&format!("files/{name}"), size, reader))?;
+    }
+
     let zip_bytes = zip.finish()?;
-    fs::rename(&temporary, out).with_context(|| format!("cannot write {}", out.display()))?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(out)
+        .with_context(|| format!("cannot write {}", out.display()))?;
     Ok(Summary {
         files: progress.files.load(Ordering::Relaxed),
         uncompressed_bytes: uncompressed,
@@ -392,7 +419,7 @@ pub fn dump_binary(
         }));
     }
 
-    run_jobs(jobs, out, progress)
+    run_jobs(jobs, out, progress, None)
 }
 
 const APK_README: &str = "Euphoria dump
@@ -569,32 +596,12 @@ pub fn dump_apk(apk: &Apk, out: &Path, options: Options, progress: &Progress) ->
         }
     }
 
-    if options.include_original {
-        jobs.push(Box::new(move || {
-            Ok(vec![entry(
-                format!("original/{}", apk.file_name),
-                apk.data.as_slice(),
-            )])
-        }));
-        let mut start = 0;
-        while start < apk.files.len() {
-            let end = (start + FILE_CHUNK).min(apk.files.len());
-            jobs.push(Box::new(move || {
-                let files = apk.read_files(start..end).map_err(|error| anyhow!(error))?;
-                Ok(files
-                    .into_iter()
-                    .map(|(name, bytes)| (format!("files/{name}"), bytes))
-                    .collect())
-            }));
-            start = end;
-        }
-    }
-
-    run_jobs(jobs, out, progress)
+    run_jobs(jobs, out, progress, options.include_original.then_some(apk))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs::{self, File};
     use std::io::Read;
 
     use super::*;
@@ -620,6 +627,41 @@ mod tests {
 
     fn scratch(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("euphoria-dump-{}-{name}.zip", std::process::id()))
+    }
+
+    #[test]
+    fn streams_apk_assets_and_preserves_output_on_failure() {
+        use std::io::{Cursor, Write};
+        use std::sync::Arc;
+
+        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        archive
+            .start_file("assets/data.txt", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        archive.write_all(b"complete asset").unwrap();
+        let bytes = archive.finish().unwrap().into_inner();
+        let mut apk = Apk::parse("app.apk".into(), bytes.clone()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("dump.zip");
+        let options = Options {
+            include_original: true,
+            decompile: false,
+        };
+        dump_apk(&apk, &out, options, &Progress::default()).unwrap();
+        assert_eq!(read_text(&out, "files/assets/data.txt"), "complete asset");
+        let mut zip = zip::ZipArchive::new(File::open(&out).unwrap()).unwrap();
+        let mut original = Vec::new();
+        zip.by_name("original/app.apk")
+            .unwrap()
+            .read_to_end(&mut original)
+            .unwrap();
+        assert_eq!(original, bytes);
+        drop(zip);
+        let saved = fs::read(&out).unwrap();
+        apk.data = Arc::new(b"unreadable archive".to_vec());
+        assert!(dump_apk(&apk, &out, options, &Progress::default()).is_err());
+        assert_eq!(fs::read(&out).unwrap(), saved);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

@@ -1,5 +1,30 @@
 use anyhow::{Result, anyhow, ensure};
 use serde::Serialize;
+use std::io::Write;
+use std::path::Path;
+
+pub(crate) fn save_copy(source: &Path, destination: &Path, bytes: &[u8]) -> Result<()> {
+    let check = || -> Result<()> {
+        if destination.try_exists()? {
+            ensure!(
+                !same_file::is_same_file(source, destination)?,
+                "choose a different file; the original cannot be overwritten"
+            );
+        }
+        Ok(())
+    };
+    check()?;
+    let parent = destination
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(bytes)?;
+    temporary.as_file().sync_all()?;
+    check()?;
+    temporary.persist(destination)?;
+    Ok(())
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Patch {
@@ -60,6 +85,22 @@ pub fn apply(data: &mut [u8], patches: &[Patch]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saves_copies_without_changing_the_source_or_its_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("original.bin");
+        let alias = dir.path().join("alias.bin");
+        let copy = dir.path().join("copy.bin");
+        std::fs::write(&source, b"original").unwrap();
+        std::fs::hard_link(&source, &alias).unwrap();
+        assert!(save_copy(&source, &source, b"changed").is_err());
+        assert!(save_copy(&source, &alias, b"changed").is_err());
+        std::fs::write(&copy, b"old copy").unwrap();
+        save_copy(&source, &copy, b"changed").unwrap();
+        assert_eq!(std::fs::read(&source).unwrap(), b"original");
+        assert_eq!(std::fs::read(&copy).unwrap(), b"changed");
+    }
 
     #[test]
     fn plans_a_shorter_replacement_and_null_pads_the_rest() {

@@ -1,6 +1,6 @@
-use std::fs::{self, File};
 use std::io::{BufWriter, Read, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -37,20 +37,22 @@ pub fn is_dataset(data: &[u8]) -> bool {
 }
 
 pub fn write(path: &Path, meta: &Meta, bytes: &[u8]) -> Result<u64> {
-    let temporary = path.with_extension("euph.tmp");
-    let result = write_file(&temporary, meta, bytes);
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-        return result;
-    }
-
-    fs::rename(&temporary, path).with_context(|| format!("cannot write {}", path.display()))?;
-    result
+    write_cancellable(path, meta, bytes, &AtomicBool::new(false))
 }
 
-fn write_file(path: &Path, meta: &Meta, bytes: &[u8]) -> Result<u64> {
-    let file = File::create(path).with_context(|| format!("cannot write {}", path.display()))?;
-    let mut output = BufWriter::new(file);
+pub fn write_cancellable(
+    path: &Path,
+    meta: &Meta,
+    bytes: &[u8],
+    cancelled: &AtomicBool,
+) -> Result<u64> {
+    ensure!(!cancelled.load(Ordering::Relaxed), "Save canceled");
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    let mut output = BufWriter::new(temporary.as_file_mut());
     output.write_all(MAGIC)?;
     output.write_all(&VERSION.to_le_bytes())?;
 
@@ -60,10 +62,18 @@ fn write_file(path: &Path, meta: &Meta, bytes: &[u8]) -> Result<u64> {
     encoder.window_log(WINDOW_LOG)?;
     encoder.write_all(&(meta.len() as u64).to_le_bytes())?;
     encoder.write_all(&meta)?;
-    encoder.write_all(bytes)?;
+    for chunk in bytes.chunks(1024 * 1024) {
+        ensure!(!cancelled.load(Ordering::Relaxed), "Save canceled");
+        encoder.write_all(chunk)?;
+    }
     encoder.finish()?.flush()?;
-
-    Ok(fs::metadata(path)?.len())
+    temporary.as_file().sync_all()?;
+    let size = temporary.as_file().metadata()?.len();
+    ensure!(!cancelled.load(Ordering::Relaxed), "Save canceled");
+    temporary
+        .persist(path)
+        .with_context(|| format!("cannot write {}", path.display()))?;
+    Ok(size)
 }
 
 pub fn read(data: &[u8]) -> Result<(Meta, Vec<u8>)> {
@@ -107,6 +117,17 @@ pub fn read(data: &[u8]) -> Result<(Meta, Vec<u8>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    #[test]
+    fn canceled_save_preserves_existing_dataset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("saved.euph");
+        fs::write(&path, b"keep").unwrap();
+        assert!(write_cancellable(&path, &meta(b"new"), b"new", &AtomicBool::new(true)).is_err());
+        assert_eq!(fs::read(path).unwrap(), b"keep");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
 
     fn meta(bytes: &[u8]) -> Meta {
         Meta {

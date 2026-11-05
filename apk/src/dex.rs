@@ -165,10 +165,10 @@ impl Reader<'_> {
 
     fn string_at(&self, offset: u32) -> Option<String> {
         let mut at = offset as usize;
-        self.uleb(&mut at)?;
+        let utf16_size = self.uleb(&mut at)?;
         let rest = self.data.get(at..)?;
         let end = rest.iter().position(|&byte| byte == 0)?;
-        Some(String::from_utf8_lossy(&rest[..end]).into_owned())
+        euphoria_decompiler::java_strings::decode_mutf8(&rest[..end], utf16_size)
     }
 }
 
@@ -214,7 +214,7 @@ impl Dex {
                 reader
                     .u32_at(string_start + index * 4)
                     .and_then(|offset| reader.string_at(offset))
-                    .unwrap_or_default()
+                    .unwrap_or_else(|| format!("<invalid DEX string #{index}>"))
             })
             .collect();
         let types = (0..type_count)

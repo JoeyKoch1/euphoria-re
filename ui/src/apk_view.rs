@@ -43,6 +43,7 @@ pub struct ApkView {
     selected: Option<usize>,
     lines: Vec<ClassLine>,
     strings: Filter,
+    escape_unicode: bool,
     files: Filter,
 }
 
@@ -65,6 +66,7 @@ impl ApkView {
             selected: None,
             lines: Vec::new(),
             strings: Filter::all(apk.strings.len()),
+            escape_unicode: false,
             files: Filter::all(apk.files.len()),
             classes,
             apk: Arc::new(apk),
@@ -386,18 +388,20 @@ fn draw_code_line(ui: &Ui, rect: egui::Rect, line: &ClassLine) {
 }
 
 fn strings(ui: &mut Ui, view: &mut ApkView) {
+    ui.checkbox(&mut view.escape_unicode, "Escape Unicode")
+        .on_hover_text("Show Unicode code points when characters appear as boxes. This does not decrypt strings.");
     let apk = &view.apk;
     let filter = &mut view.strings;
-    filter.bar(
+    filter.bar_matching(
         ui,
         "Filter by text, or type base64",
         apk.strings.len(),
-        |i| {
+        |i, query| {
             let found = &apk.strings[i];
-            match &found.base64 {
-                Some(decoded) => format!("{} base64 {decoded}", found.value),
-                None => found.value.clone(),
-            }
+            tabs::contains_folded(&found.value, query)
+                || found.base64.as_ref().is_some_and(|decoded| {
+                    tabs::contains_folded("base64", query) || tabs::contains_folded(decoded, query)
+                })
         },
     );
     if filter.matches.is_empty() {
@@ -436,7 +440,8 @@ fn strings(ui: &mut Ui, view: &mut ApkView) {
                     ("Text", theme::TEXT)
                 };
                 table::text(ui, row.cells[2], kind, theme::MUTED, theme::body());
-                let drawn = table::text(ui, row.cells[3], &found.value, color, theme::mono());
+                let shown = string_preview(&found.value, view.escape_unicode);
+                let drawn = table::text(ui, row.cells[3], &shown, color, theme::mono());
                 if let Some(decoded) = &found.base64 {
                     let shown: String = decoded.chars().take(MAX_TIP_CHARS).collect();
                     tools::underline(ui, drawn, color);
@@ -450,6 +455,34 @@ fn strings(ui: &mut Ui, view: &mut ApkView) {
             }
         },
     );
+}
+
+fn string_preview(value: &str, escape_unicode: bool) -> String {
+    let mut shown = String::new();
+    for ch in value.chars().take(MAX_TIP_CHARS) {
+        if escape_unicode {
+            shown.extend(ch.escape_default());
+        } else {
+            shown.extend(ch.escape_debug());
+        }
+    }
+    if value.chars().nth(MAX_TIP_CHARS).is_some() {
+        shown.push_str("...");
+    }
+    shown
+}
+
+#[cfg(test)]
+mod string_tests {
+    use super::*;
+
+    #[test]
+    fn previews_stay_on_one_line_and_can_show_missing_glyphs() {
+        assert_eq!(string_preview("a\n\r\t\0", false), "a\\n\\r\\t\\0");
+        assert_eq!(string_preview("水", false), "水");
+        assert_eq!(string_preview("水", true), "\\u{6c34}");
+        assert!(string_preview(&"a".repeat(MAX_TIP_CHARS + 1), false).ends_with("..."));
+    }
 }
 
 fn files(ui: &mut Ui, view: &mut ApkView) {

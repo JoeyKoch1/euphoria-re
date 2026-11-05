@@ -144,7 +144,7 @@ impl Analysis {
     pub fn save_patched(&self, path: &Path, patches: &[Patch]) -> Result<()> {
         let mut data = (*self.data).clone();
         patch::apply(&mut data, patches)?;
-        fs::write(path, &data).with_context(|| format!("cannot write {}", path.display()))
+        patch::save_copy(&self.path, path, &data)
     }
 
     pub fn read(&self, va: u64, len: usize) -> Option<&[u8]> {

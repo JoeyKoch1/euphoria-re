@@ -832,6 +832,7 @@ name = "euphoria-apk"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "euphoria-decompiler",
  "euphoria-engine",
  "serde",
  "zip",
@@ -909,6 +910,7 @@ dependencies = [
  "flate2",
  "serde",
  "serde_json",
+ "tempfile",
  "zip",
 ]
 
@@ -921,9 +923,11 @@ dependencies = [
  "euphoria-capi",
  "euphoria-formats",
  "iced-x86",
+ "same-file",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "zstd",
 ]
 

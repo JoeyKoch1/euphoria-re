@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use flate2::Compression;
@@ -96,39 +96,100 @@ impl<W: Write> ZipFile<W> {
     }
 
     pub(crate) fn add(&mut self, file: Compressed) -> io::Result<u64> {
-        let too_large = file.size >= MAX_U32 || file.data.len() as u64 >= MAX_U32;
+        self.add_data(
+            &file.name,
+            file.crc,
+            file.size,
+            file.data.len() as u64,
+            file.method,
+            &mut file.data.as_slice(),
+        )
+    }
+
+    pub(crate) fn add_reader(
+        &mut self,
+        name: &str,
+        size: u64,
+        reader: &mut dyn Read,
+    ) -> io::Result<u64> {
+        if size >= MAX_U32 {
+            return Err(io::Error::other("entry is too large"));
+        }
+        let mut spool = tempfile::tempfile()?;
+        let mut encoder = DeflateEncoder::new(&mut spool, Compression::fast());
+        let mut crc = crc32fast::Hasher::new();
+        let mut total = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = reader.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            total += read as u64;
+            if total > size {
+                return Err(io::Error::other("entry exceeds its declared size"));
+            }
+            crc.update(&buffer[..read]);
+            encoder.write_all(&buffer[..read])?;
+        }
+        if total != size {
+            return Err(io::Error::other("entry is incomplete"));
+        }
+        encoder.finish()?;
+        let packed = spool.stream_position()?;
+        spool.rewind()?;
+        self.add_data(
+            name,
+            crc.finalize(),
+            size,
+            packed,
+            METHOD_DEFLATE,
+            &mut spool,
+        )
+    }
+
+    fn add_data(
+        &mut self,
+        name: &str,
+        crc: u32,
+        size: u64,
+        packed: u64,
+        method: u16,
+        reader: &mut dyn Read,
+    ) -> io::Result<u64> {
+        let too_large = size >= MAX_U32 || packed >= MAX_U32;
         if too_large {
             return Err(io::Error::other(format!(
                 "{} is too large for one dump entry",
-                file.name
+                name
             )));
         }
 
-        let name = self.unique_name(&file.name);
+        let name = self.unique_name(name);
         let mut header = Vec::with_capacity(30 + name.len());
         put32(&mut header, LOCAL_SIGNATURE);
         put16(&mut header, VERSION);
         put16(&mut header, FLAG_UTF8);
-        put16(&mut header, file.method);
+        put16(&mut header, method);
         put16(&mut header, self.time);
         put16(&mut header, self.date);
-        put32(&mut header, file.crc);
-        put32(&mut header, file.data.len() as u32);
-        put32(&mut header, file.size as u32);
+        put32(&mut header, crc);
+        put32(&mut header, packed as u32);
+        put32(&mut header, size as u32);
         put16(&mut header, name.len() as u16);
         put16(&mut header, 0);
         header.extend_from_slice(name.as_bytes());
 
         self.out.write_all(&header)?;
-        self.out.write_all(&file.data)?;
+        io::copy(reader, &mut self.out)?;
 
-        let written = (header.len() + file.data.len()) as u64;
+        let written = header.len() as u64 + packed;
         self.entries.push(CentralEntry {
             name,
-            crc: file.crc,
-            size: file.size as u32,
-            packed: file.data.len() as u32,
-            method: file.method,
+            crc,
+            size: size as u32,
+            packed: packed as u32,
+            method,
             offset: self.offset,
         });
         self.offset += written;
@@ -325,6 +386,27 @@ mod tests {
     fn add(zip: &mut ZipFile<&mut Vec<u8>>, name: &str, bytes: &[u8]) {
         zip.add(compress(name.to_owned(), bytes.to_vec()).unwrap())
             .unwrap();
+    }
+
+    #[test]
+    fn streams_entries_and_rejects_incomplete_data() {
+        let bytes = b"asset data".repeat(100_000);
+        let mut out = Vec::new();
+        let mut zip = ZipFile::new(&mut out);
+        zip.add_reader("asset.bin", bytes.len() as u64, &mut bytes.as_slice())
+            .unwrap();
+        zip.finish().unwrap();
+        let mut archive = read_back(out);
+        let mut restored = Vec::new();
+        archive
+            .by_name("asset.bin")
+            .unwrap()
+            .read_to_end(&mut restored)
+            .unwrap();
+        assert_eq!(restored, bytes);
+        let mut zip = ZipFile::new(Vec::new());
+        assert!(zip.add_reader("short", 4, &mut &b"abc"[..]).is_err());
+        assert!(zip.add_reader("long", 2, &mut &b"abc"[..]).is_err());
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use std::ops::Range;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Rect, RichText, Sense, Stroke, Ui};
 use euphoria_engine::{Function, Line, StringEntry, TokenKind, XrefKind};
@@ -52,6 +53,7 @@ pub struct Filter {
     pub query: String,
     pub matches: Vec<usize>,
     selected: Option<usize>,
+    pending: Option<Instant>,
 }
 
 impl Filter {
@@ -60,15 +62,21 @@ impl Filter {
             query: String::new(),
             matches: (0..count).collect(),
             selected: None,
+            pending: None,
         }
     }
 
     pub fn update(&mut self, count: usize, haystack: impl Fn(usize) -> String) {
+        self.update_matching(count, |i, query| contains_folded(&haystack(i), query));
+    }
+
+    fn update_matching(&mut self, count: usize, matches: impl Fn(usize, &str) -> bool) {
         let query = self.query.to_lowercase();
         self.matches = (0..count)
-            .filter(|&i| haystack(i).to_lowercase().contains(&query))
+            .filter(|&i| query.is_empty() || matches(i, &query))
             .collect();
         self.selected = None;
+        self.pending = None;
     }
 
     pub fn bar(
@@ -77,6 +85,18 @@ impl Filter {
         hint: &str,
         count: usize,
         haystack: impl Fn(usize) -> String,
+    ) {
+        self.bar_matching(ui, hint, count, |i, query| {
+            contains_folded(&haystack(i), query)
+        });
+    }
+
+    pub fn bar_matching(
+        &mut self,
+        ui: &mut Ui,
+        hint: &str,
+        count: usize,
+        matches: impl Fn(usize, &str) -> bool,
     ) {
         egui::Frame::new()
             .inner_margin(egui::Margin::symmetric(12, 10))
@@ -88,7 +108,16 @@ impl Filter {
                             .desired_width(460.0),
                     );
                     if field.changed() {
-                        self.update(count, &haystack);
+                        self.pending = Some(Instant::now());
+                    }
+                    if let Some(changed) = self.pending {
+                        let delay = Duration::from_millis(150);
+                        if count < 10_000 || self.query.is_empty() || changed.elapsed() >= delay {
+                            self.update_matching(count, &matches);
+                        } else {
+                            ui.ctx()
+                                .request_repaint_after(delay.saturating_sub(changed.elapsed()));
+                        }
                     }
                     ui.label(
                         RichText::new(format!("{} of {count}", self.matches.len()))
@@ -96,6 +125,19 @@ impl Filter {
                     );
                 });
             });
+    }
+}
+
+pub fn contains_folded(text: &str, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    if text.is_ascii() {
+        text.as_bytes()
+            .windows(query.len())
+            .any(|part| part.eq_ignore_ascii_case(query.as_bytes()))
+    } else {
+        text.to_lowercase().contains(query)
     }
 }
 
@@ -484,16 +526,17 @@ pub fn strings(ui: &mut Ui, project: &mut Project) -> Option<Action> {
     let listing = &project.listing;
     let strings = &listing.strings;
     let filter = &mut project.strings;
-    filter.bar(
+    filter.bar_matching(
         ui,
         "Filter by address or text, or type base64",
         strings.len(),
-        |i| {
+        |i, query| {
             let entry = &strings[i];
-            match &entry.base64 {
-                Some(decoded) => format!("{:#x} {} base64 {decoded}", entry.va, entry.value),
-                None => format!("{:#x} {}", entry.va, entry.value),
-            }
+            contains_folded(&entry.value, query)
+                || entry.base64.as_ref().is_some_and(|decoded| {
+                    contains_folded("base64", query) || contains_folded(decoded, query)
+                })
+                || contains_folded(&format!("{:#x}", entry.va), query)
         },
     );
     if filter.matches.is_empty() {
@@ -572,4 +615,26 @@ pub fn hex_bytes(bytes: &[u8]) -> String {
         .map(|byte| format!("{byte:02X}"))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+
+    #[test]
+    fn filters_borrowed_text_and_restores_all_rows() {
+        let rows = ["HELLO", "Ångström", "world"];
+        let mut filter = Filter::all(rows.len());
+        filter.query = "ång".into();
+        filter.update_matching(rows.len(), |i, query| contains_folded(rows[i], query));
+        assert_eq!(filter.matches, [1]);
+        filter.query = "hello".into();
+        filter.update_matching(rows.len(), |i, query| contains_folded(rows[i], query));
+        assert_eq!(filter.matches, [0]);
+        filter.query.clear();
+        filter.update_matching(rows.len(), |_, _| panic!("empty search must not scan text"));
+        assert_eq!(filter.matches, [0, 1, 2]);
+        assert!(contains_folded("", ""));
+        assert!(!contains_folded("a", "long query"));
+    }
 }

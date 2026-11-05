@@ -22,6 +22,10 @@ pub enum Error {
     Tls(#[from] rustls::Error),
     #[error("the server sent a response Aero could not read")]
     BadResponse,
+    #[error("the response exceeded the size limit")]
+    ResponseTooLarge,
+    #[error("the response body was incomplete")]
+    IncompleteResponse,
     #[error("{0} is an IP address, so it has no subdomains to scan")]
     NotADomain(String),
 }

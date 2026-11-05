@@ -8,7 +8,7 @@ use std::io::{Cursor, Read};
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use euphoria_engine::{base64_text, dataset::sha256_hex, entropy};
 use serde::Serialize;
 use zip::ZipArchive;
@@ -183,18 +183,16 @@ impl Apk {
                 continue;
             }
 
-            let mut bytes = Vec::new();
-            if let Err(error) = (&mut entry).take(MAX_ENTRY_BYTES).read_to_end(&mut bytes) {
-                apk.warnings.push(format!("{name}: {error}"));
-                continue;
+            match read_entry_bytes(&mut entry, MAX_ENTRY_BYTES) {
+                Ok(bytes) => apk.read_entry(&name, bytes),
+                Err(error) => apk.warnings.push(format!("{name}: {error}")),
             }
-            apk.read_entry(&name, bytes);
         }
 
         apk.signing.v2_or_later = has_v2_signature(&data);
         apk.find_protectors();
-        apk.collect_strings();
         apk.dexes.sort_by(|a, b| a.name.cmp(&b.name));
+        apk.collect_strings();
         apk.data = Arc::new(data);
         Ok(apk)
     }
@@ -262,35 +260,44 @@ impl Apk {
             .sum()
     }
 
-    // Unpacks a run of entries by position, skipping folders and anything unreadable.
-    pub fn read_files(&self, range: std::ops::Range<usize>) -> Result<Vec<(String, Vec<u8>)>> {
+    pub fn for_each_file(
+        &self,
+        mut visit: impl FnMut(&str, u64, &mut dyn Read) -> Result<()>,
+    ) -> Result<()> {
         let mut archive = ZipArchive::new(Cursor::new(self.data.as_slice()))?;
-        let mut files = Vec::new();
-        for index in range {
-            let Ok(entry) = archive.by_index(index) else {
-                continue;
-            };
+        for index in 0..archive.len() {
+            let mut entry = archive
+                .by_index(index)
+                .with_context(|| format!("cannot read APK entry {index}"))?;
             if entry.is_dir() {
                 continue;
             }
-            let Ok(name) = entry.name().map(|name| name.into_owned()) else {
-                continue;
-            };
-            let mut bytes = Vec::new();
-            if entry.take(MAX_ENTRY_BYTES).read_to_end(&mut bytes).is_ok() {
-                files.push((name, bytes));
-            }
+            let name = entry.name()?.into_owned();
+            let size = entry.size();
+            ensure!(
+                size <= MAX_ENTRY_BYTES,
+                "{name} exceeds the APK entry limit of {MAX_ENTRY_BYTES} bytes"
+            );
+            visit(&name, size, &mut entry).with_context(|| format!("cannot export {name}"))?;
         }
-        Ok(files)
+        Ok(())
     }
 
     pub fn read_file(&self, name: &str) -> Result<Vec<u8>> {
         let mut archive = ZipArchive::new(Cursor::new(self.data.as_slice()))?;
-        let entry = archive.by_name(name)?;
-        let mut bytes = Vec::new();
-        entry.take(MAX_ENTRY_BYTES).read_to_end(&mut bytes)?;
-        Ok(bytes)
+        let mut entry = archive.by_name(name)?;
+        read_entry_bytes(&mut entry, MAX_ENTRY_BYTES).with_context(|| format!("cannot read {name}"))
     }
+}
+
+fn read_entry_bytes(reader: &mut impl Read, limit: u64) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader.take(limit + 1).read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() as u64 <= limit,
+        "APK entry exceeds the limit of {limit} bytes"
+    );
+    Ok(bytes)
 }
 
 fn wanted(name: &str) -> bool {
@@ -347,6 +354,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rejects_oversized_entries_instead_of_truncating() {
+        assert_eq!(read_entry_bytes(&mut &b"abc"[..], 3).unwrap(), b"abc");
+        assert!(read_entry_bytes(&mut &b"abcd"[..], 3).is_err());
+    }
+
+    #[test]
+    fn string_indexes_follow_sorted_dexes() {
+        use std::io::Write;
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, value) in [
+            ("classes2.dex", b"second".as_slice()),
+            ("classes.dex", b"first".as_slice()),
+        ] {
+            let mut dex = dex::tests::sample_dex();
+            let offset = dex.len() as u32;
+            dex[0x70..0x74].copy_from_slice(&offset.to_le_bytes());
+            dex.push(value.len() as u8);
+            dex.extend_from_slice(value);
+            dex.push(0);
+            writer
+                .start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(&dex).unwrap();
+        }
+        let apk = Apk::parse("multi.apk".into(), writer.finish().unwrap().into_inner()).unwrap();
+        assert_eq!(apk.dexes[0].name, "classes.dex");
+        assert_eq!(apk.strings[0].value, "first");
+        for found in &apk.strings {
+            assert_eq!(found.value, apk.dexes[found.dex].string(found.index as u32));
+        }
+        assert!(
+            apk.for_each_file(|_, _, _| anyhow::bail!("read failed"))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn reads_a_whole_apk() {
         let apk = Apk::parse("app.apk".to_owned(), test_data::sample_apk()).unwrap();
 
@@ -365,6 +409,25 @@ mod tests {
                 .iter()
                 .any(|entry| entry.value == "https://example.com/api")
         );
+    }
+
+    #[test]
+    fn decodes_java_strings_through_apk_loading() {
+        use std::io::Write;
+
+        let mut dex = dex::tests::sample_dex();
+        let offset = dex.len() as u32;
+        dex[0x70..0x74].copy_from_slice(&offset.to_le_bytes());
+        // Three UTF-16 units: embedded null followed by a surrogate pair.
+        dex.extend_from_slice(&[3, 0xc0, 0x80, 0xed, 0xa0, 0xbd, 0xed, 0xb8, 0x80, 0]);
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file("classes.dex", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(&dex).unwrap();
+        let apk = Apk::parse("java.apk".to_owned(), writer.finish().unwrap().into_inner()).unwrap();
+        assert_eq!(apk.strings[0].value, "\0😀");
+        assert_eq!(apk.dexes[0].string(0), "\0😀");
     }
 
     #[test]

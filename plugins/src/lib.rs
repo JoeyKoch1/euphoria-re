@@ -234,7 +234,6 @@ impl PluginHost {
 
     // Reads the plugin folder again. Running plugins restart, so edits to their files take effect.
     pub fn refresh(&mut self) {
-        self.upgrade_examples();
         let enabled = self.read_enabled();
         self.entries.clear();
 
@@ -311,24 +310,23 @@ impl PluginHost {
         }
     }
 
-    // Copies we shipped earlier get replaced on their own. Nothing new gets added here.
-    fn upgrade_examples(&self) {
-        for (file, source) in EXAMPLES {
-            let path = self.dir.join(file);
-            if path.exists() && example_is_outdated(&path, source, file) {
-                let _ = fs::write(path, source);
-            }
-        }
-    }
-
     pub fn install_examples(&mut self) -> std::io::Result<usize> {
         fs::create_dir_all(&self.dir)?;
         let mut added = 0;
         for (file, source) in EXAMPLES {
             let path = self.dir.join(file);
-            if example_is_outdated(&path, source, file) {
-                fs::write(path, source)?;
-                added += 1;
+            use std::io::Write;
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+            {
+                Ok(mut output) => {
+                    output.write_all(source.as_bytes())?;
+                    added += 1;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
             }
         }
         self.refresh();
@@ -408,16 +406,6 @@ fn read_source(path: &Path) -> Result<String, String> {
         return Err("This plugin file is too large".to_owned());
     }
     fs::read_to_string(path).map_err(|error| error.to_string())
-}
-
-// Replaces a missing example or an older copy we shipped, and leaves anything else alone.
-fn example_is_outdated(path: &Path, source: &str, file: &str) -> bool {
-    let Ok(existing) = fs::read_to_string(path) else {
-        return true;
-    };
-    let installed = parse_meta(&existing, file);
-    let bundled = parse_meta(source, file);
-    installed.author == bundled.author && installed.version != bundled.version
 }
 
 fn start(entry: &mut Entry, source: &str, view: Option<Rc<BinaryView>>, tab: &str) {
@@ -587,14 +575,17 @@ mod tests {
     }
 
     #[test]
-    fn upgrades_old_examples_but_keeps_files_the_user_owns() {
+    fn installing_examples_preserves_existing_files() {
         let dir = scratch("upgrade");
         let path = dir.join("hello_tab.lua");
         let mut host = PluginHost::open(dir.clone());
 
         fs::write(&path, "-- @author Euphoria\n-- @version 0.1\n").unwrap();
         host.install_examples().unwrap();
-        assert!(fs::read_to_string(&path).unwrap().contains("add_tab"));
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "-- @author Euphoria\n-- @version 0.1\n"
+        );
 
         fs::write(&path, "-- @author Someone Else\n-- @version 0.1\n").unwrap();
         host.install_examples().unwrap();
@@ -620,7 +611,7 @@ mod tests {
     }
 
     #[test]
-    fn older_shipped_examples_upgrade_when_the_folder_opens() {
+    fn opening_plugins_preserves_older_examples() {
         let dir = scratch("opens-upgraded");
         fs::create_dir_all(&dir).unwrap();
         let old = "-- @name Discord Presence\n-- @version 2.0\n-- @author Euphoria\n";
@@ -632,7 +623,7 @@ mod tests {
 
         let upgraded = fs::read_to_string(dir.join("discord_presence.lua")).unwrap();
         assert!(!upgraded.contains("button"));
-        assert_ne!(upgraded, old);
+        assert_eq!(upgraded, old);
         assert_eq!(
             fs::read_to_string(dir.join("string_search.lua")).unwrap(),
             mine

@@ -4,6 +4,7 @@ mod canvas;
 mod debug_view;
 mod decompile_view;
 mod dump_view;
+mod file_job;
 mod graph_view;
 mod network;
 mod plugin_view;
@@ -21,13 +22,14 @@ use std::sync::Arc;
 
 use eframe::egui::{self, Align, Layout, RichText, Ui};
 use euphoria_engine::{Analysis, Arch, Inspection, Listing, dataset};
-use euphoria_plugins::{BinaryView, Request};
+use euphoria_plugins::Request;
 
 use advanced::Hypervisor;
 use apk_view::ApkView;
 use debug_view::{DebugState, Notice};
 use decompile_view::DecompileState;
 use dump_view::{DumpState, Source};
+use file_job::{FileJob, LoadedFile, Outcome};
 use graph_view::GraphState;
 use network::NetworkState;
 use plugin_view::PluginPage;
@@ -99,11 +101,19 @@ struct Project {
 }
 
 impl Project {
-    fn open(path: &Path) -> anyhow::Result<Self> {
+    fn open(
+        path: &Path,
+        progress: impl Fn(&'static str) -> anyhow::Result<()>,
+    ) -> anyhow::Result<Self> {
+        progress("Analyzing file...")?;
         let analysis = Analysis::open(path)?;
+        progress("Building disassembly...")?;
         let listing = analysis.listing();
+        progress("Indexing routines...")?;
         let jumps = listing.jumps(MAX_JUMP_ROWS);
         let entry = listing.row_at(analysis.entry).unwrap_or(0);
+        progress("Inspecting sections...")?;
+        let inspection = analysis.inspect();
 
         Ok(Self {
             functions: Filter::all(analysis.functions.len()),
@@ -111,10 +121,10 @@ impl Project {
             strings: Filter::all(listing.strings.len()),
             graph: GraphState::new(analysis.functions.len()),
             decompile: DecompileState::default(),
-            public: PublicState::new(&analysis.sha256),
+            public: PublicState::default(),
             breakpoints: BTreeSet::new(),
             xor: XorState::default(),
-            inspection: analysis.inspect(),
+            inspection,
             cursor: entry,
             scroll_to: Some(entry),
             analysis: Arc::new(analysis),
@@ -149,62 +159,70 @@ struct App {
     command: String,
     status: Option<String>,
     error: Option<String>,
+    file_job: Option<FileJob>,
 }
 
 impl App {
     fn open(&mut self, path: &Path) {
+        if self.file_job.is_some() {
+            return;
+        }
         self.path = path.display().to_string();
         self.status = None;
+        self.clear_file();
+        self.file_job = Some(FileJob::open(path.to_owned()));
+    }
 
-        if euphoria_apk::is_apk(path) {
-            match euphoria_apk::Apk::open(path) {
-                Ok(apk) => {
-                    self.network.load_apk_links(&apk);
-                    self.plugins.host.set_binary(Some(BinaryView::named(
-                        apk.file_name.clone(),
-                        "android",
-                        apk.sha256.clone(),
-                        Arc::clone(&apk.data),
-                    )));
-                    self.apk = Some(ApkView::new(apk));
-                    self.tab = Tab::Apk;
-                }
-                Err(error) => self.status = Some(format!("{error:#}")),
-            }
-            return;
-        }
-
-        if euphoria_sql::is_sql_file(path) {
-            match euphoria_sql::open(path) {
-                Ok(script) => {
-                    self.sql = Some(SqlView::new(script));
-                    self.tab = Tab::Sql;
-                }
-                Err(error) => self.status = Some(format!("{error:#}")),
-            }
-            return;
-        }
-
+    fn clear_file(&mut self) {
         self.debug.close();
-        match Project::open(path) {
-            Ok(project) => {
-                self.network.load_links(&project.listing);
-                self.network.restore(&project.analysis.extras);
-                self.plugins
-                    .host
-                    .set_binary(Some(BinaryView::new(&project.analysis, &project.listing)));
-                self.project = Some(project);
-                self.tab = Tab::Listing;
-                self.error = None;
-            }
-            Err(error) => {
-                self.project = None;
-                self.plugins.host.set_binary(None);
-                self.error = Some(format!("{error:#}"));
-                if matches!(self.tab, Tab::Host(_)) {
-                    self.tab = Tab::Listing;
+        self.project = None;
+        self.apk = None;
+        self.sql = None;
+        self.network = NetworkState::default();
+        self.plugins.host.set_binary(None);
+        self.command.clear();
+        self.error = None;
+        self.tab = Tab::Listing;
+    }
+
+    fn poll_file_job(&mut self, ctx: &egui::Context) {
+        let Some(job) = self.file_job.as_mut() else {
+            return;
+        };
+        let outcome = job.poll();
+        if let Some(outcome) = outcome {
+            self.file_job = None;
+            match outcome {
+                Ok(Outcome::Opened(path, loaded, network)) => {
+                    self.path = path.display().to_string();
+                    self.network = network;
+                    match *loaded {
+                        LoadedFile::Binary(mut project, view) => {
+                            project.public = PublicState::new(&project.analysis.sha256);
+                            self.plugins.host.set_binary(Some(view));
+                            self.project = Some(*project);
+                            self.tab = Tab::Listing;
+                        }
+                        LoadedFile::Apk(apk, view) => {
+                            self.plugins.host.set_binary(Some(view));
+                            self.apk = Some(apk);
+                            self.tab = Tab::Apk;
+                        }
+                        LoadedFile::Sql(sql) => {
+                            self.sql = Some(sql);
+                            self.tab = Tab::Sql;
+                        }
+                    }
+                    self.status = None;
+                }
+                Ok(Outcome::Saved(bytes)) => self.status = Some(format!("Saved {bytes} bytes")),
+                Err(error) => {
+                    self.error = Some(error.clone());
+                    self.status = Some(error);
                 }
             }
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
     }
 
@@ -222,6 +240,9 @@ impl App {
     }
 
     fn save_dataset(&mut self) {
+        if self.file_job.is_some() {
+            return;
+        }
         let Some(project) = &self.project else {
             return;
         };
@@ -238,20 +259,12 @@ impl App {
             return;
         };
 
-        let original = project.analysis.data.len().max(1) as f64;
-        self.status = Some(
-            match project
-                .analysis
-                .save_dataset(&path, self.network.snapshot())
-            {
-                Ok(written) => format!(
-                    "Saved {} bytes, {:.1}% of the original",
-                    written,
-                    written as f64 / original * 100.0
-                ),
-                Err(error) => format!("Could not save: {error:#}"),
-            },
-        );
+        self.error = None;
+        self.file_job = Some(FileJob::save(
+            path,
+            Arc::clone(&project.analysis),
+            self.network.snapshot(),
+        ));
     }
 
     fn dump_source(&self) -> Option<Source> {
@@ -429,14 +442,24 @@ impl App {
             );
             let submitted =
                 field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-            if ui.button("Browse").clicked() {
+            if ui
+                .add_enabled(self.file_job.is_none(), egui::Button::new("Browse"))
+                .clicked()
+            {
                 self.browse();
             }
-            if ui.button("Open").clicked() || submitted {
+            if ui
+                .add_enabled(self.file_job.is_none(), egui::Button::new("Open"))
+                .clicked()
+                || submitted
+            {
                 self.open_typed_path();
             }
             if ui
-                .add_enabled(self.project.is_some(), egui::Button::new("Save .euph"))
+                .add_enabled(
+                    self.project.is_some() && self.file_job.is_none(),
+                    egui::Button::new("Save .euph"),
+                )
                 .clicked()
             {
                 self.save_dataset();
@@ -453,6 +476,13 @@ impl App {
             }
 
             ui.add_space(16.0);
+            if let Some(job) = self.file_job.as_mut() {
+                ui.spinner();
+                ui.label(job.progress);
+                if ui.button("Cancel").clicked() {
+                    job.cancel();
+                }
+            }
             let jump = ui.add(
                 egui::TextEdit::singleline(&mut self.command)
                     .hint_text(RichText::new("jump 0x140001000").font(theme::mono()))
@@ -681,6 +711,7 @@ fn bar(fill: egui::Color32) -> egui::Frame {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.poll_file_job(&ctx);
         self.network.poll(&ctx);
         self.plugins.poll(&ctx);
         self.poll_debugger(&ctx);
@@ -747,4 +778,30 @@ fn main() -> eframe::Result {
             Ok(Box::new(app))
         }),
     )
+}
+
+#[cfg(test)]
+mod file_tests {
+    use super::*;
+
+    #[test]
+    fn switching_files_clears_previous_views_and_commands() {
+        let empty_zip = b"PK\x05\x06\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+        let apk = euphoria_apk::Apk::parse("empty.apk".into(), empty_zip.to_vec()).unwrap();
+        let mut app = App {
+            apk: Some(ApkView::new(apk)),
+            sql: Some(SqlView::new(euphoria_sql::Script::default())),
+            command: "old command".into(),
+            tab: Tab::Apk,
+            ..App::default()
+        };
+        app.clear_file();
+        assert!(app.apk.is_none());
+        assert!(app.sql.is_none());
+        assert!(app.project.is_none());
+        assert!(app.dump_source().is_none());
+        assert!(app.network.hosts.is_empty());
+        assert!(app.command.is_empty());
+        assert!(app.tab == Tab::Listing);
+    }
 }
