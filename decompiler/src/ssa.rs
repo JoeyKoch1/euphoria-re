@@ -1427,6 +1427,21 @@ pub fn parameters(func: &Func) -> Vec<(Var, Base)> {
         })
         .collect();
 
+    while params.last().is_some_and(|(var, _)| var.is_none()) {
+        params.pop();
+    }
+    let float_args = match (func.bits, func.win64) {
+        (32, _) => 0,
+        (_, true) => 4,
+        _ => 8,
+    };
+    for index in 0..float_args {
+        let base = Base::Reg(Register::XMM0 + index);
+        if let Some(var) = entries.get(&base) {
+            params.push((Some(*var), base));
+        }
+    }
+
     let first = first_stack_arg(func.bits, func.win64);
     let ptr = i64::from(func.bits / 8);
     let last_slot = entries

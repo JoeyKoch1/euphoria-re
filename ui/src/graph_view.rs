@@ -109,7 +109,7 @@ fn build_view(ui: &Ui, project: &Project, function: &Function) -> View {
 
     View {
         va: function.va,
-        name: tabs::function_label(function),
+        name: tabs::function_label(project, function),
         first_row: project.listing.rows_of(function).start,
         layout: layout(&sizes, &edges),
         cfg,
@@ -175,6 +175,7 @@ pub fn show(ui: &mut Ui, project: &mut Project, live: Option<u64>) -> Option<Act
 fn sidebar(ui: &mut Ui, project: &mut Project) -> Option<Action> {
     let mut action = None;
     let functions = &project.analysis.functions;
+    let names = &project.names;
     let filter = &mut project.graph.filter;
     let current = project.graph.view.as_ref().map(|view| view.va);
 
@@ -188,7 +189,7 @@ fn sidebar(ui: &mut Ui, project: &mut Project) -> Option<Action> {
                     .desired_width(f32::INFINITY),
             );
             if field.changed() {
-                filter.update(functions.len(), |i| tabs::function_label(&functions[i]));
+                filter.update(functions.len(), |i| tabs::named_label(names, &functions[i]));
             }
             ui.add_space(4.0);
 
@@ -212,7 +213,7 @@ fn sidebar(ui: &mut Ui, project: &mut Project) -> Option<Action> {
                         table::text(
                             ui,
                             rect,
-                            &tabs::function_label(function),
+                            &tabs::named_label(names, function),
                             color,
                             FontId::monospace(12.5),
                         );
@@ -253,6 +254,7 @@ fn header(ui: &mut Ui, view: &mut View) {
                         ("direct", theme::MUTED),
                         ("falls through", theme::NUMBER),
                         ("jumps", theme::ACCENT),
+                        ("loops", theme::GUESSED),
                     ] {
                         ui.label(RichText::new(label).color(color));
                     }
@@ -298,10 +300,14 @@ fn draw_canvas(
 
     let zoom = view.viewport.zoom;
     for (route, kind) in view.layout.routes.iter().zip(&view.kinds) {
-        let color = match kind {
-            EdgeKind::Taken => theme::ACCENT,
-            EdgeKind::NotTaken => theme::NUMBER,
-            EdgeKind::Always => theme::MUTED,
+        let color = if route.back {
+            theme::GUESSED
+        } else {
+            match kind {
+                EdgeKind::Taken => theme::ACCENT,
+                EdgeKind::NotTaken => theme::NUMBER,
+                EdgeKind::Always => theme::MUTED,
+            }
         };
         let highlighted =
             selected_block.is_some_and(|block| route.from == block || route.to == block);
@@ -330,11 +336,23 @@ fn draw_canvas(
             egui::StrokeKind::Inside,
         );
 
+        let block = &view.cfg.blocks[index];
+        let header_rect = Rect::from_min_size(min, egui::vec2(node.width, HEADER_HEIGHT * zoom));
+        let hit = ui
+            .interact(
+                header_rect.intersect(rect),
+                ui.scope_id().with(("graph_block", view.va, index)),
+                Sense::click(),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if hit.clicked() {
+            action = Some(Action::Select(view.first_row + block.lines.start));
+        }
+
         if zoom < TEXT_ZOOM {
             continue;
         }
 
-        let block = &view.cfg.blocks[index];
         let font = FontId::monospace(FONT_SIZE * zoom);
         let title = if index == 0 {
             clip(&view.name)

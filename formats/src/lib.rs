@@ -41,6 +41,14 @@ impl Image<'_> {
             seeds: &self.seeds,
         }
     }
+
+    pub fn add_seed(&mut self, va: u64) -> bool {
+        if self.seeds.contains(&va) {
+            return false;
+        }
+        self.seeds.push(va);
+        true
+    }
 }
 
 pub fn parse(data: &[u8]) -> Result<Image<'_>, Error> {
@@ -196,5 +204,48 @@ mod tests {
     #[test]
     fn rejects_garbage() {
         assert!(matches!(parse(&[0u8; 64]), Err(Error::Malformed(_))));
+    }
+
+    #[test]
+    fn never_panics_on_damaged_images() {
+        let magics: [&[u8]; 5] = [
+            b"MZ",
+            b"\x7fELF",
+            &[0xCF, 0xFA, 0xED, 0xFE],
+            &[0xCE, 0xFA, 0xED, 0xFE],
+            &[0x50, 0x4B, 0x03, 0x04],
+        ];
+        for magic in magics {
+            for length in [0, 1, 4, 8, 16, 64, 512] {
+                let mut bytes = vec![0u8; length];
+                let take = magic.len().min(length);
+                bytes[..take].copy_from_slice(&magic[..take]);
+                let _ = parse(&bytes);
+            }
+        }
+
+        let data = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+        for length in [
+            0,
+            1,
+            2,
+            4,
+            16,
+            64,
+            0x100,
+            0x200,
+            0x400,
+            data.len() / 2,
+            data.len() - 1,
+        ] {
+            let _ = parse(&data[..length.min(data.len())]);
+        }
+        for seed in 0..64u8 {
+            let mut bytes = data[..data.len().min(2048)].to_vec();
+            for (index, byte) in bytes.iter_mut().enumerate() {
+                *byte ^= seed.wrapping_add(index as u8);
+            }
+            let _ = parse(&bytes);
+        }
     }
 }

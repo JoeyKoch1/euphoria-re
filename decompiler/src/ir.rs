@@ -523,6 +523,14 @@ pub fn simplify(expr: &mut Expr, vars: &[VarInfo]) {
 fn simplify_node(expr: &Expr, vars: &[VarInfo]) -> Option<Expr> {
     match expr {
         Expr::Bin(op, a, b, width) => simplify_bin(*op, a, b, *width),
+        Expr::Cast(CastKind::FromFloat, inner, width) => match inner.as_ref() {
+            Expr::Float(value) => Some(Expr::Const(*value as u64 & mask(*width), *width)),
+            _ => simplify_cast(CastKind::FromFloat, inner, *width, vars),
+        },
+        Expr::Cast(CastKind::ToFloat, inner, _) => match inner.as_ref() {
+            Expr::Const(value, width) => Some(Expr::Float(sign_extend(*value, *width) as f64)),
+            _ => simplify_cast(CastKind::ToFloat, inner, 8, vars),
+        },
         Expr::Cast(kind, inner, width) => simplify_cast(*kind, inner, *width, vars),
         Expr::Cmp(op, a, b, width) => simplify_cmp(*op, a, b, *width),
         Expr::Un(UnOp::BoolNot, inner, _) => match inner.as_ref() {

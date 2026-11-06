@@ -1,3 +1,4 @@
+mod fields;
 mod ir;
 pub mod java_strings;
 mod lift;
@@ -16,9 +17,10 @@ use iced_x86::{
     Register,
 };
 
+pub use fields::FieldAccess;
 use ir::{Base, Func, Var};
 use lift::{Callee, Callees, lift};
-pub use print::{Line, Token, TokenKind};
+pub use print::{Guess, Line, Token, TokenKind};
 
 const STACK_BYTES: usize = 128 * 1024 * 1024;
 const MAX_CALLEE_BYTES: u64 = 64 * 1024;
@@ -236,14 +238,35 @@ impl<'a> Decompiler<'a> {
 
     // Runs on its own large stack, so a huge or strange routine reports an error and nothing else
     // goes down with it.
-    pub fn decompile(&self, function: &Function) -> Result<Output> {
+    fn scoped<T: Send>(&self, run: impl FnOnce() -> Result<T> + Send) -> Result<T> {
         thread::scope(|scope| {
             thread::Builder::new()
                 .stack_size(STACK_BYTES)
-                .spawn_scoped(scope, || self.run(function))
+                .spawn_scoped(scope, run)
                 .context("could not start the decompiler thread")?
                 .join()
                 .map_err(|_| anyhow!("the decompiler could not handle this routine"))?
+        })
+    }
+
+    pub fn decompile(&self, function: &Function) -> Result<Output> {
+        self.scoped(|| self.run(function))
+    }
+
+    // Reports the memory this routine touches through each base pointer, which hints at the
+    // structure layout it was compiled against.
+    pub fn field_map(&self, va: u64) -> Result<Vec<FieldAccess>> {
+        let function = self
+            .analysis
+            .function_containing(va)
+            .ok_or_else(|| anyhow!("{va:#x} is not inside a known routine"))?;
+        self.scoped(|| {
+            let view = View {
+                owner: self,
+                deep: false,
+            };
+            let func = analyze(self.analysis, &view, function)?;
+            Ok(fields::collect(&func))
         })
     }
 

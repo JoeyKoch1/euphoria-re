@@ -260,6 +260,19 @@ impl Apk {
             .sum()
     }
 
+    // Sorted and de-duplicated, because one .so per ABI is common and only the set matters.
+    pub fn native_abis(&self) -> Vec<String> {
+        let mut abis: Vec<String> = self
+            .natives
+            .iter()
+            .map(|library| library.abi.clone())
+            .filter(|abi| !abi.is_empty())
+            .collect();
+        abis.sort();
+        abis.dedup();
+        abis
+    }
+
     pub fn for_each_file(
         &self,
         mut visit: impl FnMut(&str, u64, &mut dyn Read) -> Result<()>,
@@ -320,8 +333,7 @@ fn has_v2_signature(data: &[u8]) -> bool {
         .any(|window| window == V2_SIGNATURE_MAGIC)
 }
 
-#[cfg(test)]
-pub(crate) mod test_data {
+pub mod samples {
     use std::io::Write;
 
     use zip::ZipWriter;
@@ -329,12 +341,12 @@ pub(crate) mod test_data {
 
     use crate::{axml, dex};
 
-    pub(crate) fn sample_apk() -> Vec<u8> {
+    pub fn demo_apk() -> Vec<u8> {
         let mut writer = ZipWriter::new(std::io::Cursor::new(Vec::new()));
         let options = SimpleFileOptions::default();
         let files: [(&str, Vec<u8>); 4] = [
-            ("AndroidManifest.xml", axml::tests::sample_manifest()),
-            ("classes.dex", dex::tests::sample_dex()),
+            ("AndroidManifest.xml", axml::sample::sample_manifest()),
+            ("classes.dex", dex::sample::sample_dex()),
             (
                 "lib/arm64-v8a/libjiagu.so",
                 vec![0x7F, b'E', b'L', b'F', 1, 2],
@@ -367,7 +379,7 @@ mod tests {
             ("classes2.dex", b"second".as_slice()),
             ("classes.dex", b"first".as_slice()),
         ] {
-            let mut dex = dex::tests::sample_dex();
+            let mut dex = dex::sample::sample_dex();
             let offset = dex.len() as u32;
             dex[0x70..0x74].copy_from_slice(&offset.to_le_bytes());
             dex.push(value.len() as u8);
@@ -392,7 +404,7 @@ mod tests {
 
     #[test]
     fn reads_a_whole_apk() {
-        let apk = Apk::parse("app.apk".to_owned(), test_data::sample_apk()).unwrap();
+        let apk = Apk::parse("app.apk".to_owned(), samples::demo_apk()).unwrap();
 
         assert_eq!(apk.warnings, Vec::<String>::new());
         assert_eq!(apk.files.len(), 4);
@@ -400,6 +412,11 @@ mod tests {
         assert_eq!(apk.class_count(), 1);
         assert_eq!(apk.method_count(), 1);
         assert_eq!(apk.natives[0].abi, "arm64-v8a");
+        assert_eq!(apk.native_abis(), ["arm64-v8a"]);
+        assert_eq!(
+            apk.manifest.launcher_activity.as_deref(),
+            Some("com.example.app.MainActivity")
+        );
         assert_eq!(apk.protectors, ["Qihoo 360 Jiagu"]);
         assert_eq!(apk.signing.v1_files, ["META-INF/CERT.RSA"]);
         assert!(!apk.signing.v2_or_later);
@@ -415,7 +432,7 @@ mod tests {
     fn decodes_java_strings_through_apk_loading() {
         use std::io::Write;
 
-        let mut dex = dex::tests::sample_dex();
+        let mut dex = dex::sample::sample_dex();
         let offset = dex.len() as u32;
         dex[0x70..0x74].copy_from_slice(&offset.to_le_bytes());
         // Three UTF-16 units: embedded null followed by a surrogate pair.
@@ -432,7 +449,7 @@ mod tests {
 
     #[test]
     fn finds_base64_in_dex_strings() {
-        let apk = Apk::parse("app.apk".to_owned(), test_data::sample_apk()).unwrap();
+        let apk = Apk::parse("app.apk".to_owned(), samples::demo_apk()).unwrap();
         let hit = apk.strings.iter().find(|s| s.base64.is_some()).unwrap();
         assert_eq!(hit.base64.as_deref(), Some("Hello from Euphoria"));
     }

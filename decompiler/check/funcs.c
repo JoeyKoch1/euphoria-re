@@ -1,6 +1,12 @@
 // Pure integer routines used to compare the decompiler's output with the original machine code.
+#if defined(_MSC_VER)
+#define NI __declspec(noinline)
+#else
 #define NI __attribute__((noinline))
+#endif
 #include <stdint.h>
+
+struct pair { int a; int b; };
 
 NI int f_add(int a, int b) { return a + b * 3 - 7; }
 NI int f_abs(int a) { return a < 0 ? -a : a; }
@@ -53,3 +59,8 @@ NI int f_ptr(int *p, int n) { int s = 0; for (int i = 0; i < n; i++) s += p[i]; 
 NI void f_fill(int *p, int n, int v) { for (int i = 0; i < n; i++) p[i] = v + i; }
 NI int f_local(int a) { int arr[4]; f_fill(arr, 4, a); return f_ptr(arr, 4); }
 NI int f_strlen(const char *s) { int n = 0; while (*s++) n++; return n; }
+NI int f_pair(const struct pair *p, int k) { return p->a * k + p->b; }
+NI void f_scale(int *p, int n, int k) { for (int i = 0; i < n; i++) p[i] = p[i] * k + 1; }
+NI int f_fib(int n) { return n < 2 ? n : f_fib(n - 1) + f_fib(n - 2); }
+NI int64_t f_i64div(int64_t a, int64_t b) { return b ? a / b + a % b : 0; }
+NI unsigned f_uadd(unsigned a, unsigned b) { return a * 3u + b; }

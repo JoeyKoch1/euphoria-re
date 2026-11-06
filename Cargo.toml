@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["aero", "apk", "capi", "community", "debugger", "decompiler", "dump", "formats", "engine", "plugins", "sql", "cli", "ui"]
+members = ["aero", "android", "apk", "capi", "community", "debugger", "decompiler", "dump", "formats", "engine", "plugins", "sql", "cli", "ui"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +10,7 @@ license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
 
 [workspace.dependencies]
 aero = { path = "aero" }
+euphoria-android = { path = "android" }
 euphoria-apk = { path = "apk" }
 euphoria-capi = { path = "capi" }
 euphoria-community = { path = "community" }

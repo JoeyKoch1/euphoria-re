@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 aero.workspace = true
+euphoria-android.workspace = true
 euphoria-apk.workspace = true
 euphoria-community.workspace = true
 euphoria-debugger.workspace = true

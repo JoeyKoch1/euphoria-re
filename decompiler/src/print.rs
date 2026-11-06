@@ -31,11 +31,36 @@ pub struct Token {
     pub target: Option<u64>,
 }
 
+// Why a line is a best guess rather than something recovered exactly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Guess {
+    Unlifted,
+    IndirectCall,
+    Unstructured,
+    Signature,
+}
+
+impl Guess {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Guess::Unlifted => "raw assembly, because Euphoria could not lift this instruction",
+            Guess::IndirectCall => "the callee and its arguments are unknown",
+            Guess::Unstructured => "control flow that does not match a C construct",
+            Guess::Signature => "part of this signature could not be recovered",
+        }
+    }
+
+    fn note(self) -> String {
+        format!("  // guessed: {}", self.reason())
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Line {
     pub indent: usize,
     pub tokens: Vec<Token>,
     pub va: Option<u64>,
+    pub guess: Option<Guess>,
 }
 
 impl Line {
@@ -61,6 +86,24 @@ fn int_type(width: Width, signed: bool) -> &'static str {
         (4, false) => "uint32_t",
         (_, true) => "int64_t",
         (_, false) => "uint64_t",
+    }
+}
+
+fn pointee_type(width: Width) -> &'static str {
+    match width {
+        1 => "char",
+        2 => "int16_t",
+        4 => "int32_t",
+        8 => "int64_t",
+        _ => "void",
+    }
+}
+
+fn pointer_type(pointee: Width) -> String {
+    if pointee == 0 {
+        "void *".to_owned()
+    } else {
+        format!("{} *", pointee_type(pointee))
     }
 }
 
@@ -137,14 +180,16 @@ pub struct Printer<'a> {
     listing: &'a Listing,
     func: &'a Func,
     names: HashMap<Var, String>,
-    pointers: HashSet<Var>,
-    memory_slots: BTreeMap<i64, Width>,
+    pointers: HashMap<Var, Width>,
+    unsigned: HashSet<Var>,
+    memory_slots: BTreeMap<i64, (Width, bool)>,
     array_slots: BTreeSet<i64>,
     labels: BTreeSet<usize>,
     lines: Vec<Line>,
     tokens: Vec<Token>,
     indent: usize,
     line_va: Option<u64>,
+    line_guess: Option<Guess>,
     nested: bool,
 }
 
@@ -160,7 +205,8 @@ impl<'a> Printer<'a> {
             listing,
             func,
             names: HashMap::new(),
-            pointers: HashSet::new(),
+            pointers: HashMap::new(),
+            unsigned: HashSet::new(),
             memory_slots: BTreeMap::new(),
             array_slots: BTreeSet::new(),
             labels,
@@ -168,6 +214,7 @@ impl<'a> Printer<'a> {
             tokens: Vec::new(),
             indent: 0,
             line_va: None,
+            line_guess: None,
             nested: false,
         }
     }
@@ -189,12 +236,27 @@ impl<'a> Printer<'a> {
     }
 
     fn end_line(&mut self) {
-        let tokens = std::mem::take(&mut self.tokens);
+        let mut tokens = std::mem::take(&mut self.tokens);
+        let guess = self.line_guess.take();
+        if let Some(guess) = guess
+            && !tokens.is_empty()
+        {
+            tokens.push(Token {
+                text: guess.note(),
+                kind: TokenKind::Comment,
+                target: None,
+            });
+        }
         self.lines.push(Line {
             indent: self.indent,
             tokens,
             va: self.line_va.take(),
+            guess,
         });
+    }
+
+    fn guessed(&mut self, guess: Guess) {
+        self.line_guess.get_or_insert(guess);
     }
 
     fn line_at(&mut self, va: u64) {
@@ -287,15 +349,25 @@ impl<'a> Printer<'a> {
 
         self.find_stack_memory(&stmts, &exprs);
         self.find_pointers(&stmts, &exprs);
+        self.find_unsigned(&stmts, &exprs);
     }
 
     fn find_stack_memory(&mut self, stmts: &[Stmt], exprs: &[Expr]) {
         let mut addressed = BTreeSet::new();
-        fn scan(expr: &Expr, memory: &mut BTreeMap<i64, Width>, addressed: &mut BTreeSet<i64>) {
+        fn note(memory: &mut BTreeMap<i64, (Width, bool)>, offset: i64, width: Width, float: bool) {
+            let entry = memory.entry(offset).or_insert((width, false));
+            entry.0 = entry.0.max(width);
+            entry.1 |= float;
+        }
+        fn scan(
+            expr: &Expr,
+            memory: &mut BTreeMap<i64, (Width, bool)>,
+            addressed: &mut BTreeSet<i64>,
+        ) {
             match expr {
-                Expr::Load { addr, width, .. } => {
+                Expr::Load { addr, width, float } => {
                     if let Expr::StackAddr(offset) = addr.as_ref() {
-                        memory.entry(*offset).or_insert(*width);
+                        note(memory, *offset, *width, *float);
                     } else {
                         scan(addr, memory, addressed);
                     }
@@ -318,10 +390,11 @@ impl<'a> Printer<'a> {
             if let StmtKind::Store {
                 addr: Expr::StackAddr(offset),
                 width,
+                float,
                 ..
             } = &stmt.kind
             {
-                memory.entry(*offset).or_insert(*width);
+                note(&mut memory, *offset, *width, *float);
                 addressed.remove(offset);
             }
         }
@@ -331,24 +404,31 @@ impl<'a> Printer<'a> {
     }
 
     // A pointer-width variable that gets dereferenced and never used for other math reads best as
-    // a byte pointer, since offsets then count bytes just like the machine code does.
+    // a typed pointer, since offsets then count whole elements just like the machine code does.
     fn find_pointers(&mut self, stmts: &[Stmt], exprs: &[Expr]) {
-        let mut bases = HashSet::new();
+        let mut bases: HashMap<Var, Width> = HashMap::new();
         let mut blocked = HashSet::new();
 
-        fn collect_base(addr: &Expr, bases: &mut HashSet<Var>) {
-            match addr {
-                Expr::Var(var) => {
-                    bases.insert(*var);
+        fn note(bases: &mut HashMap<Var, Width>, var: Var, width: Width) {
+            match bases.get_mut(&var) {
+                Some(known) if *known == width => {}
+                Some(known) => *known = 0,
+                None => {
+                    bases.insert(var, width);
                 }
-                Expr::Bin(BinOp::Add | BinOp::Sub, left, ..) => collect_base(left, bases),
+            }
+        }
+        fn collect_base(addr: &Expr, bases: &mut HashMap<Var, Width>, width: Width) {
+            match addr {
+                Expr::Var(var) => note(bases, *var, width),
+                Expr::Bin(BinOp::Add | BinOp::Sub, left, ..) => collect_base(left, bases, width),
                 _ => {}
             }
         }
-        fn scan(expr: &Expr, bases: &mut HashSet<Var>, blocked: &mut HashSet<Var>) {
+        fn scan(expr: &Expr, bases: &mut HashMap<Var, Width>, blocked: &mut HashSet<Var>) {
             match expr {
-                Expr::Load { addr, .. } => {
-                    collect_base(addr, bases);
+                Expr::Load { addr, width, .. } => {
+                    collect_base(addr, bases, *width);
                     scan(addr, bases, blocked);
                 }
                 Expr::Bin(BinOp::Add | BinOp::Sub, left, right, _) => {
@@ -387,28 +467,95 @@ impl<'a> Printer<'a> {
             scan(expr, &mut bases, &mut blocked);
         }
         for stmt in stmts {
-            if let StmtKind::Store { addr, .. } = &stmt.kind {
-                collect_base(addr, &mut bases);
+            if let StmtKind::Store { addr, width, .. } = &stmt.kind {
+                collect_base(addr, &mut bases, *width);
+            }
+            // A pointer reassigned through arithmetic keeps its byte offsets. Declaring it as a
+            // typed pointer would make C scale those offsets a second time.
+            if let StmtKind::Assign { var, value } = &stmt.kind
+                && matches!(value, Expr::Bin(..))
+            {
+                blocked.insert(*var);
+                value.for_each_var(&mut |used| {
+                    blocked.insert(used);
+                });
             }
         }
         let ptr = (self.func.bits / 8) as Width;
         self.pointers = bases
             .into_iter()
-            .filter(|var| {
+            .filter(|(var, _)| {
                 let info = self.func.vars[var.0 as usize];
                 info.width == ptr && !info.float && !blocked.contains(var)
             })
             .collect();
     }
 
-    fn var_type(&self, var: Var) -> &'static str {
+    // A variable only needs a signed declaration if it is never read as an unsigned value.
+    fn find_unsigned(&mut self, stmts: &[Stmt], exprs: &[Expr]) {
+        fn mark(expr: &Expr, unsigned: &mut HashSet<Var>) {
+            let mut add = |expr: &Expr| {
+                expr.for_each_var(&mut |var| {
+                    unsigned.insert(var);
+                });
+            };
+            match expr {
+                Expr::Bin(BinOp::Shr, left, right, _) => {
+                    add(left);
+                    mark(right, unsigned);
+                }
+                Expr::Bin(BinOp::UDiv | BinOp::URem, left, right, _) => {
+                    add(left);
+                    add(right);
+                }
+                Expr::Cmp(op, left, right, _) if op.is_unsigned() => {
+                    add(left);
+                    add(right);
+                }
+                Expr::Cast(CastKind::Zext, inner, _) => {
+                    add(inner);
+                    mark(inner, unsigned);
+                }
+                other => {
+                    for child in other.children() {
+                        mark(child, unsigned);
+                    }
+                }
+            }
+        }
+
+        let mut unsigned = HashSet::new();
+        for expr in exprs {
+            mark(expr, &mut unsigned);
+        }
+        for stmt in stmts {
+            match &stmt.kind {
+                StmtKind::Assign { value, .. } => mark(value, &mut unsigned),
+                StmtKind::Store { addr, value, .. } => {
+                    mark(addr, &mut unsigned);
+                    mark(value, &mut unsigned);
+                }
+                StmtKind::Call { target, args, .. } => {
+                    mark(target, &mut unsigned);
+                    for arg in args {
+                        mark(arg, &mut unsigned);
+                    }
+                }
+                _ => {}
+            }
+        }
+        unsigned.retain(|var| !self.pointers.contains_key(var));
+        self.unsigned = unsigned;
+    }
+
+    fn var_type(&self, var: Var) -> String {
         let info = self.func.vars[var.0 as usize];
         if info.float {
-            "double"
-        } else if self.pointers.contains(&var) {
-            "char *"
+            "double".to_owned()
+        } else if let Some(&pointee) = self.pointers.get(&var) {
+            pointer_type(pointee)
         } else {
-            int_type(info.width, true)
+            int_type(info.width, !self.unsigned.contains(&var)).to_owned()
         }
     }
 
@@ -454,30 +601,37 @@ impl<'a> Printer<'a> {
             self.end_line();
         }
 
-        let ret_width = returned_width(nodes, self.func);
-        let ret_type = match ret_width {
-            Some((_, true)) => "double",
-            Some((width, false)) => int_type(width, true),
-            None => "void",
+        let pointer_return = returns_pointer(nodes, &self.pointers);
+        let ret_type = if pointer_return {
+            "void *".to_owned()
+        } else {
+            match returned_width(nodes, self.func) {
+                Some((_, true)) => "double".to_owned(),
+                Some((width, false)) => int_type(width, true).to_owned(),
+                None => "void".to_owned(),
+            }
         };
         self.put(ret_type, TokenKind::Type);
         self.plain(" ");
         let name = function_name(self.analysis, va);
         self.put(name, TokenKind::Call);
         self.plain("(");
+        let mut guessed_signature = false;
         for (index, (var, _)) in params.iter().enumerate() {
             if index > 0 {
                 self.plain(", ");
             }
             if var.0 == u32::MAX {
+                guessed_signature = true;
                 let ptr = (self.func.bits / 8) as Width;
                 self.put(int_type(ptr, true), TokenKind::Type);
                 self.plain(" ");
                 self.put(format!("unused{}", index + 1), TokenKind::Variable);
             } else {
                 let kind = self.var_type(*var);
+                let spaced = !kind.ends_with('*');
                 self.put(kind, TokenKind::Type);
-                if !kind.ends_with('*') {
+                if spaced {
                     self.plain(" ");
                 }
                 let name = self.names[var].clone();
@@ -488,6 +642,9 @@ impl<'a> Printer<'a> {
             self.put("void", TokenKind::Type);
         }
         self.plain(")");
+        if guessed_signature {
+            self.guessed(Guess::Signature);
+        }
         self.line_at(va);
         self.end_line();
         self.plain("{");
@@ -498,8 +655,9 @@ impl<'a> Printer<'a> {
         let mut declared = false;
         for var in used.iter().filter(|var| !param_vars.contains(var)) {
             let kind = self.var_type(*var);
+            let spaced = !kind.ends_with('*');
             self.put(kind, TokenKind::Type);
-            if !kind.ends_with('*') {
+            if spaced {
                 self.plain(" ");
             }
             let name = self.names[var].clone();
@@ -508,9 +666,18 @@ impl<'a> Printer<'a> {
             self.end_line();
             declared = true;
         }
-        let memory: Vec<(i64, Width)> = self.memory_slots.iter().map(|(a, b)| (*a, *b)).collect();
-        for (offset, width) in memory {
-            self.put(int_type(width, true), TokenKind::Type);
+        let memory: Vec<(i64, Width, bool)> = self
+            .memory_slots
+            .iter()
+            .map(|(offset, (width, float))| (*offset, *width, *float))
+            .collect();
+        for (offset, width, float) in memory {
+            let kind = if float {
+                "double"
+            } else {
+                int_type(width, true)
+            };
+            self.put(kind, TokenKind::Type);
             self.plain(" ");
             self.put(slot_name(offset), TokenKind::Variable);
             self.plain(";");
@@ -701,6 +868,7 @@ impl<'a> Printer<'a> {
                 self.end_line();
             }
             Node::Goto(block) => {
+                self.guessed(Guess::Unstructured);
                 self.keyword("goto");
                 self.plain(" ");
                 let label = self.label_name(*block);
@@ -765,6 +933,7 @@ impl<'a> Printer<'a> {
                 self.plain(")");
             }
             StmtKind::Opaque { text, .. } => {
+                self.guessed(Guess::Unlifted);
                 self.keyword("__asm__");
                 self.plain("(");
                 self.put(c_string(text), TokenKind::Text);
@@ -815,6 +984,7 @@ impl<'a> Printer<'a> {
                 self.put(short_import(name), TokenKind::Call);
             }
             other => {
+                self.guessed(Guess::IndirectCall);
                 let ptr = (self.func.bits / 8) as Width;
                 self.plain("((");
                 self.put(int_type(ptr, true), TokenKind::Type);
@@ -835,6 +1005,44 @@ impl<'a> Printer<'a> {
             self.put(format!("g_{va:x}"), TokenKind::Variable);
             return;
         }
+
+        if !float {
+            if let Expr::Var(var) = addr
+                && self.pointers.get(var) == Some(&width)
+            {
+                self.plain("*");
+                let name = self.names[var].clone();
+                self.put(name, TokenKind::Variable);
+                return;
+            }
+            if let Expr::Bin(BinOp::Add, base, index, _) = addr
+                && let Expr::Var(var) = base.as_ref()
+                && self.pointers.get(var) == Some(&width)
+            {
+                let name = self.names[var].clone();
+                match index.as_ref() {
+                    Expr::Const(offset, _) => {
+                        let step = sign_extend(*offset, (self.func.bits / 8) as Width)
+                            / i64::from(width.max(1));
+                        self.put(name, TokenKind::Variable);
+                        self.plain("[");
+                        self.put(step.to_string(), TokenKind::Number);
+                        self.plain("]");
+                        return;
+                    }
+                    Expr::Bin(BinOp::Mul, value, scale, _) if matches!(scale.as_ref(), Expr::Const(size, _) if *size == u64::from(width)) =>
+                    {
+                        self.put(name, TokenKind::Variable);
+                        self.plain("[");
+                        self.expr(value, 0);
+                        self.plain("]");
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         let kind = if float {
             if width == 4 { "float" } else { "double" }
         } else {
@@ -882,7 +1090,7 @@ impl<'a> Printer<'a> {
 
     fn signed_view(&mut self, expr: &Expr, width: Width) {
         let plain = match expr {
-            Expr::Var(var) => !self.pointers.contains(var),
+            Expr::Var(var) => !self.pointers.contains_key(var) && !self.unsigned.contains(var),
             Expr::Const(..) | Expr::Load { .. } => true,
             Expr::Cast(CastKind::Sext | CastKind::Trunc, ..) => true,
             _ => false,
@@ -898,6 +1106,12 @@ impl<'a> Printer<'a> {
     fn unsigned_view(&mut self, expr: &Expr, width: Width) {
         if let Expr::Const(value, _) = expr {
             self.number(*value, width, false);
+            return;
+        }
+        if let Expr::Var(var) = expr
+            && self.unsigned.contains(var)
+        {
+            self.expr(expr, 12);
             return;
         }
         self.cast_prefix(width, false);
@@ -1155,6 +1369,35 @@ fn slot_name(offset: i64) -> String {
 
 fn register_name(register: Register) -> String {
     format!("{register:?}").to_lowercase()
+}
+
+fn returns_pointer(nodes: &[Node], pointers: &HashMap<Var, Width>) -> bool {
+    fn walk(nodes: &[Node], pointers: &HashMap<Var, Width>, found: &mut bool) {
+        for node in nodes {
+            match node {
+                Node::Return(Some(Expr::Var(var)), _) if pointers.contains_key(var) => {
+                    *found = true
+                }
+                Node::If { then, other, .. } => {
+                    walk(then, pointers, found);
+                    walk(other, pointers, found);
+                }
+                Node::Loop { body, .. }
+                | Node::While { body, .. }
+                | Node::DoWhile { body, .. }
+                | Node::For { body, .. } => walk(body, pointers, found),
+                Node::Switch { cases, .. } => {
+                    for (_, body) in cases {
+                        walk(body, pointers, found);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut found = false;
+    walk(nodes, pointers, &mut found);
+    found
 }
 
 fn returned_width(nodes: &[Node], func: &Func) -> Option<(Width, bool)> {

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
@@ -47,6 +48,24 @@ pub enum Action {
     Open(std::path::PathBuf),
     ShowHost(usize),
     ShowDecompiler,
+    Patch {
+        address: u64,
+        bytes: Vec<u8>,
+        note: String,
+    },
+    JumpEditor {
+        address: u64,
+        length: usize,
+    },
+    EditBytes {
+        address: u64,
+        bytes: Vec<u8>,
+    },
+    Breakpoint(u64),
+    Bookmark(u64),
+    Rename(u64),
+    Comment(u64),
+    Decompile(u64),
 }
 
 pub struct Filter {
@@ -152,6 +171,7 @@ pub fn disassembly(ui: &mut Ui, project: &mut Project, debug: &mut DebugState) -
 
     table::header(ui, &DISASSEMBLY);
     let mut action = debug_view::controls(ui, project, debug);
+    let stopped = debug.is_stopped();
     let scroll_to = project.scroll_to.take();
     let count = project.listing.rows.len();
     let live = debug.current_image_ip();
@@ -171,11 +191,14 @@ pub fn disassembly(ui: &mut Ui, project: &mut Project, debug: &mut DebugState) -
 
             for (index, line) in range.clone().zip(&lines) {
                 let flagged = project.breakpoints.contains(&line.va);
+                let bookmarked = project.bookmarks.contains(&line.va);
+                let patched = debug.is_patched(line.va, line.bytes.len());
                 let row = table::code_row(
                     ui,
                     widths,
                     index == project.cursor,
                     flagged,
+                    bookmarked,
                     live == Some(line.va),
                 );
                 if row.response.clicked() {
@@ -183,6 +206,22 @@ pub fn disassembly(ui: &mut Ui, project: &mut Project, debug: &mut DebugState) -
                 }
                 if row.response.double_clicked() {
                     debug.toggle_breakpoint(project, line.va);
+                }
+                row.response.context_menu(|ui| {
+                    quick_menu(
+                        ui,
+                        line.va,
+                        &line.bytes,
+                        line.branch,
+                        bookmarked,
+                        stopped,
+                        &mut action,
+                    );
+                });
+                if patched {
+                    row.response
+                        .clone()
+                        .on_hover_text("Euphoria wrote over these bytes in the running process.");
                 }
 
                 flow_cell = Some(row.cells[0]);
@@ -192,20 +231,26 @@ pub fn disassembly(ui: &mut Ui, project: &mut Project, debug: &mut DebugState) -
                     ui,
                     row.cells[1],
                     &format!("{:#x}", line.va),
-                    theme::MUTED,
+                    if patched {
+                        theme::PATCHED
+                    } else {
+                        theme::MUTED
+                    },
                     theme::mono(),
                 );
                 table::text(
                     ui,
                     row.cells[2],
                     &hex_bytes(&line.bytes),
-                    theme::TEXT,
+                    if patched { theme::PATCHED } else { theme::TEXT },
                     theme::mono(),
                 );
-                if let Some(target) = instruction(ui, row.cells[3], line, index) {
+                if let Some(target) = instruction(ui, row.cells[3], line, index, patched) {
                     action = Some(Action::Go(target));
                 }
-                if let Some(comment) = comment(project, line) {
+                if patched && comment(project, line).is_none() {
+                    table::text(ui, row.cells[4], "patched", theme::PATCHED, theme::mono());
+                } else if let Some(comment) = comment(project, line) {
                     let tip = line_tip(project, line);
                     let color = if tip.is_some() {
                         theme::ACCENT
@@ -228,11 +273,15 @@ pub fn disassembly(ui: &mut Ui, project: &mut Project, debug: &mut DebugState) -
     action
 }
 
-fn instruction(ui: &Ui, cell: Rect, line: &Line, index: usize) -> Option<u64> {
+fn instruction(ui: &Ui, cell: Rect, line: &Line, index: usize, patched: bool) -> Option<u64> {
     let mut clicked = None;
     let mut cell = cell;
     for (position, token) in line.tokens.iter().enumerate() {
-        let color = token_color(token.kind);
+        let color = if patched {
+            theme::PATCHED
+        } else {
+            token_color(token.kind)
+        };
         let drawn = table::text(ui, cell, &token.text, color, theme::mono());
         if token.kind == TokenKind::Target {
             let id = ui.scope_id().with(("target", index, position));
@@ -260,11 +309,16 @@ pub fn token_color(kind: TokenKind) -> Color32 {
     }
 }
 
-pub fn function_label(function: &Function) -> String {
-    match &function.name {
-        Some(name) => name.clone(),
-        None => format!("sub_{:x}", function.va),
-    }
+pub fn function_label(project: &Project, function: &Function) -> String {
+    named_label(&project.names, function)
+}
+
+pub fn named_label(names: &BTreeMap<u64, String>, function: &Function) -> String {
+    names
+        .get(&function.va)
+        .cloned()
+        .or_else(|| function.name.clone())
+        .unwrap_or_else(|| format!("sub_{:x}", function.va))
 }
 
 fn base64_tip(entry: &StringEntry) -> Option<String> {
@@ -278,11 +332,16 @@ pub fn line_tip(project: &Project, line: &Line) -> Option<String> {
 }
 
 pub fn comment(project: &Project, line: &Line) -> Option<String> {
+    if let Some(text) = project.comments.get(&line.va) {
+        return Some(text.clone());
+    }
     let name_at = |va| {
-        project
-            .analysis
-            .function_at(va)
-            .and_then(|function| function.name.clone())
+        project.names.get(&va).cloned().or_else(|| {
+            project
+                .analysis
+                .function_at(va)
+                .and_then(|function| function.name.clone())
+        })
     };
 
     if let Some(name) = line.branch.and_then(name_at) {
@@ -362,20 +421,18 @@ fn arrow(painter: &egui::Painter, x: f32, y: f32, color: Color32) {
     ));
 }
 
-pub fn functions(ui: &mut Ui, project: &mut Project) -> Option<Action> {
+pub fn functions(ui: &mut Ui, project: &mut Project, debug: &DebugState) -> Option<Action> {
     let functions = &project.analysis.functions;
+    let names = &project.names;
     let filter = &mut project.functions;
+    let stopped = debug.is_stopped();
     filter.bar(
         ui,
         "Filter by address or routine name",
         functions.len(),
         |i| {
             let function = &functions[i];
-            format!(
-                "{:#x} {}",
-                function.va,
-                function.name.as_deref().unwrap_or("")
-            )
+            format!("{:#x} {}", function.va, named_label(names, function))
         },
     );
     if filter.matches.is_empty() {
@@ -398,6 +455,56 @@ pub fn functions(ui: &mut Ui, project: &mut Project) -> Option<Action> {
                     filter.selected = Some(position);
                     action = Some(Action::Go(function.va));
                 }
+                let bookmarked = project.bookmarks.contains(&function.va);
+                row.response.context_menu(|ui| {
+                    ui.set_min_width(210.0);
+                    if !stopped {
+                        ui.label(
+                            RichText::new("Pause the program to patch it").color(theme::MUTED),
+                        );
+                    }
+                    if ui
+                        .add_enabled(stopped, egui::Button::new("Force return (RET)"))
+                        .on_hover_text("Write RET over the first byte of the routine")
+                        .clicked()
+                    {
+                        action = Some(Action::Patch {
+                            address: function.va,
+                            bytes: vec![0xC3],
+                            note: format!("Force return from {:#x}", function.va),
+                        });
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Rename routine...").clicked() {
+                        action = Some(Action::Rename(function.va));
+                        ui.close();
+                    }
+                    if ui.button("Set comment...").clicked() {
+                        action = Some(Action::Comment(function.va));
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Go to routine").clicked() {
+                        action = Some(Action::Go(function.va));
+                        ui.close();
+                    }
+                    if ui.button("Copy start address").clicked() {
+                        ui.ctx().copy_text(format!("{:#x}", function.va));
+                        ui.close();
+                    }
+                    if ui
+                        .button(if bookmarked {
+                            "Remove bookmark"
+                        } else {
+                            "Bookmark"
+                        })
+                        .clicked()
+                    {
+                        action = Some(Action::Bookmark(function.va));
+                        ui.close();
+                    }
+                });
 
                 let end = function.va + function.size;
                 table::text(
@@ -421,8 +528,8 @@ pub fn functions(ui: &mut Ui, project: &mut Project) -> Option<Action> {
                     theme::MUTED,
                     theme::mono(),
                 );
-                let name = function.name.as_deref().unwrap_or("unnamed");
-                table::text(ui, row.cells[3], name, theme::TEXT, theme::mono());
+                let name = named_label(names, function);
+                table::text(ui, row.cells[3], &name, theme::TEXT, theme::mono());
             }
         },
     );
@@ -615,6 +722,108 @@ pub fn hex_bytes(bytes: &[u8]) -> String {
         .map(|byte| format!("{byte:02X}"))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+// The right-click menu shared by the listing and the routine table.
+fn quick_menu(
+    ui: &mut Ui,
+    address: u64,
+    bytes: &[u8],
+    branch: Option<u64>,
+    bookmarked: bool,
+    stopped: bool,
+    action: &mut Option<Action>,
+) {
+    ui.set_min_width(210.0);
+    if !stopped {
+        ui.label(RichText::new("Pause the program to patch it").color(theme::MUTED));
+    }
+    if ui
+        .add_enabled(stopped, egui::Button::new("NOP this line"))
+        .on_hover_text("Overwrite the instruction with NOPs")
+        .clicked()
+    {
+        *action = Some(Action::Patch {
+            address,
+            bytes: vec![0x90; bytes.len().max(1)],
+            note: format!("NOP at {address:#x}"),
+        });
+        ui.close();
+    }
+    if ui
+        .add_enabled(stopped, egui::Button::new("Replace with RET"))
+        .on_hover_text("Return from the routine immediately")
+        .clicked()
+    {
+        *action = Some(Action::Patch {
+            address,
+            bytes: vec![0xC3],
+            note: format!("RET at {address:#x}"),
+        });
+        ui.close();
+    }
+    let jump = ui
+        .add_enabled(
+            stopped && bytes.len() >= 5,
+            egui::Button::new("Make a jump..."),
+        )
+        .on_disabled_hover_text("Needs a paused program and at least 5 bytes");
+    if jump.clicked() {
+        *action = Some(Action::JumpEditor {
+            address,
+            length: bytes.len(),
+        });
+        ui.close();
+    }
+    if ui
+        .add_enabled(stopped, egui::Button::new("Edit bytes..."))
+        .clicked()
+    {
+        *action = Some(Action::EditBytes {
+            address,
+            bytes: bytes.to_vec(),
+        });
+        ui.close();
+    }
+    ui.separator();
+    if ui.button("Rename routine...").clicked() {
+        *action = Some(Action::Rename(address));
+        ui.close();
+    }
+    if ui.button("Set comment...").clicked() {
+        *action = Some(Action::Comment(address));
+        ui.close();
+    }
+    ui.separator();
+    if ui.button("Set or remove breakpoint").clicked() {
+        *action = Some(Action::Breakpoint(address));
+        ui.close();
+    }
+    if ui.button("Copy address").clicked() {
+        ui.ctx().copy_text(format!("{address:#x}"));
+        ui.close();
+    }
+    if !bytes.is_empty() && ui.button("Copy bytes").clicked() {
+        ui.ctx().copy_text(hex_bytes(bytes));
+        ui.close();
+    }
+    if let Some(target) = branch
+        && ui.button("Follow branch").clicked()
+    {
+        *action = Some(Action::Go(target));
+        ui.close();
+    }
+    if ui
+        .button(if bookmarked {
+            "Remove bookmark"
+        } else {
+            "Bookmark"
+        })
+        .clicked()
+    {
+        *action = Some(Action::Bookmark(address));
+        ui.close();
+    }
 }
 
 #[cfg(test)]

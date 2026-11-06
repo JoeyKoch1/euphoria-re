@@ -54,6 +54,7 @@ The function runs every time the tab redraws, so keep it quick.
 | `euphoria.read(va, length)` | Bytes as a string, up to 1 MB, or nil |
 | `euphoria.tab()` | The title of the open tab |
 | `euphoria.jump(va)` | Moves the Listing to an address |
+| `euphoria.rename(va, name)` | Names the routine containing `va`; an empty or nil name restores the default |
 | `euphoria.status(text)` | Shows text in the status bar |
 | `euphoria.log(...)` or `print(...)` | Writes to the plugin's log |
 | `euphoria.on(event, function)` | Listens for `binary_opened`, `tab_changed`, or `tick` (once a second) |

@@ -55,6 +55,17 @@ fn wait_exit(session: &Session) -> u32 {
     }
 }
 
+fn next_refresh(session: &Session) -> Snapshot {
+    loop {
+        match session.wait(WAIT).expect("timed out") {
+            Event::Refreshed(snapshot) => return *snapshot,
+            Event::Exited(code) => panic!("exited early with {code}"),
+            Event::Failed(message) => panic!("{message}"),
+            _ => {}
+        }
+    }
+}
+
 fn read_byte(session: &Session, address: u64) -> u8 {
     session.send(Command::ReadMemory { address, len: 1 });
     loop {
@@ -129,6 +140,48 @@ fn walks_through_a_64_bit_program() {
 #[test]
 fn walks_through_a_32_bit_program() {
     walk_through("SysWOW64");
+}
+
+#[test]
+fn edits_registers_and_memory_while_paused() {
+    let Some((session, _, _)) = start("System32", Vec::new()) else {
+        return;
+    };
+    let stop = next_stop(&session);
+
+    session.send(Command::WriteRegister {
+        name: "rbx",
+        value: 0x1122_3344_5566_7788,
+    });
+    let edited = next_refresh(&session);
+    assert!(
+        edited
+            .registers
+            .iter()
+            .any(|(name, value)| *name == "rbx" && *value == 0x1122_3344_5566_7788),
+        "the edited register should be visible in the refresh"
+    );
+
+    let address = stop.sp - 0x20;
+    session.send(Command::WriteMemory {
+        address,
+        bytes: vec![0xDE, 0xAD, 0xBE, 0xEF],
+    });
+    next_refresh(&session);
+    session.send(Command::ReadMemory { address, len: 4 });
+    loop {
+        match session.wait(WAIT).expect("timed out") {
+            Event::Memory { bytes, .. } => {
+                assert_eq!(bytes, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+                break;
+            }
+            Event::Failed(message) => panic!("{message}"),
+            _ => {}
+        }
+    }
+
+    session.send(Command::Stop);
+    wait_exit(&session);
 }
 
 #[test]

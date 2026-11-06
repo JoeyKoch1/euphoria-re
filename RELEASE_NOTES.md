@@ -1,0 +1,40 @@
+# Unreleased
+
+- Added a first-run welcome window and a six-step guided tour that highlights the logo menu, opening files, the listing, the debugger, and the Advanced switch. Replay it from **Quick tour** in the logo menu; the choice is saved in `guide.json`.
+- Added three bundled samples: `hello.exe`, `encoded.exe` with XOR-encoded strings, and a synthetic `demo.apk`. The welcome window and the tour can open them, and `eu sample` regenerates the APK.
+- Added suspend, resume, and terminate for attached processes, from the File tab or with F3, Shift+F3, and Ctrl+F9. Suspending and resuming report how many threads changed; stopping asks first.
+- Attaching now loads the process's main module into the analyzer at its live address, with section bytes copied from the process, so the Listing, Graph, and Decompiler show running code instead of an empty view.
+- The Debugger tab shows a live attachment: threads with captured instruction pointers, registers and stack, live code around the selected thread, a module list, a hex memory reader, and **Decompile at IP**. Registers are captured once when the live module loads and again on demand; each capture pauses every thread only for the copy. Modules can be inspected from the list at their own live base. Detach, stop, or process exit clears the live module.
+- Added right-click quick patches in the listing and Routines tab: write NOPs, replace a line with `ret`, open a jump editor that encodes a relative jump, or enter exact bytes. Patches require the debugger to be paused.
+- Patched lines are dimmed in the listing and tagged `patched` in the Notes column until the program exits or restarts, so it is clear which instructions no longer match the file on disk.
+- Added bookmarks (Ctrl+M, gold markers, and a Bookmarks pane) and a live memory map with region protection and kind.
+- Added F5 to toggle the decompiler for the cursor.
+- Hid the APK, SQL, Networking, and XOR tabs by default. Turn on Advanced Analysis in the Advanced tab to show them; opening an APK or SQL file turns it on automatically.
+- Added Run APK: boots an installed Android AVD with the official emulator, installs the loaded APK, launches it, and shows the device through scrcpy or the emulator window, with stop, restart, wipe-and-reset, app relaunch, and live logcat.
+- Set the disposable AVD's wallpaper to the Euphoria logo after boot. The helper is a small bundled DEX run as the shell user, so it needs no root; failure is reported without blocking the APK.
+- Added a network capture console. Euphoria runs a local HTTP proxy, points the AVD's system proxy at it, and lists HTTP requests with status, sizes, timing, and a text preview. HTTPS is shown as an encrypted tunnel destination, not decrypted.
+- Detects the Android SDK, emulator, adb, scrcpy, AVDs, and hardware acceleration; missing pieces are explained in the UI.
+- Added a consent-first Android setup: when tools are missing, Euphoria offers Cancel or Install, then fetches the official command-line tools, adb, emulator, a system image, an AVD, and scrcpy from Google and the official scrcpy GitHub releases. Only missing pieces are installed, checksums are verified, Java 17+ is checked first, and Cancel stops the running download.
+- Finds an APK's launcher activity and native ABIs during analysis so emulator selection and launch reuse the existing manifest data.
+- Verifies that the staged APK matches the analyzed SHA-256 and tears down the emulator, scrcpy, and logcat with the runtime.
+- Fixed Java string decoding in APKs and escaped control characters in the Strings tab.
+- Fixed DEX references when an APK stores its DEX files out of order.
+- Prevented patched copies from overwriting the original file, including through a hard link.
+- Preserved existing plugin files when refreshing or installing bundled examples.
+- Cleared the previous file's views, debugger, and networking state when opening another file.
+- Moved file loading and dataset saving off the UI thread, with progress and a Cancel button. Loading stops between processing stages; saving checks between compression chunks.
+- Made dataset saves atomic so failed or canceled saves leave the previous file intact.
+- Changed APK exports to stream assets through a fixed-size buffer instead of loading batches into memory. Compression uses temporary disk space.
+- Made APK exports fail with an error when an entry cannot be read completely. Entries over 1 GiB are rejected rather than truncated.
+- Rejected incomplete and oversized HTTP responses while allowing HEAD and bodyless responses.
+- Reduced string-search allocations and added a short typing delay for large tables.
+- Fixed the decompiler comparison script to fail on crashes, missing output, and timeouts.
+- The decompiler now marks what it could not recover: unlifted instructions, indirect calls, unstructured control flow, and weak signatures get an amber gutter marker and say why on hover.
+- The Decompiler tab shows a synchronized disassembly pane beside the pseudocode. It follows the cursor, marks the current live instruction, and supports breakpoints, patch status, and clicking a branch target to follow it.
+- Routines and instructions can be renamed or commented. Names replace `sub_` labels in the Listing, Routines, Graph, breakpoints, and decompiled calls, and travel with the file in a `.euph` dataset.
+- Added an omnibox that jumps to addresses, routine names, and strings, with `func:` and `str:` scopes and live suggestions.
+- Autosaves renames and comments to a per-file recovery copy and restores them if the app closes before a `.euph` save. A successful save discards the copy.
+- `eu overview` prints a canonical summary of a binary (sections, entropy, routine coverage, imports, largest routines, detections, findings). Its output is identical on every run, so it can be diffed or consumed by scripts.
+- Added decompiler stress tests over arbitrary bytes and a throughput benchmark over a large synthetic module.
+- Plugins can rename routines with `euphoria.rename(va, name)`. A rename-by-pattern example ships with the bundled plugins.
+- Added optional local AI assist in the Decompiler. It is off by default, and a request is made only when you press **Explain this routine**; it sends just that routine's pseudocode to a configured OpenAI-compatible endpoint, defaulting to Ollama on the same machine.

@@ -4,6 +4,10 @@ Euphoria is a disassembly and decompilation workbench for x86-64 and ARM64 binar
 
 Planning assumptions: one developer, about 15 hours a week, starting 4 November 2026. That is roughly 900 hours to v1.0, including about 140 hours for the public database in section 14. Everything below is sized to fit that budget, and the cut list in section 4 says what goes first if time runs short.
 
+### Current status (6 November 2026)
+
+A public beta is being prepared for the week of 9 November 2026, well ahead of the phase targets below. It covers PE, ELF, and Mach-O parsing; x86 and x64 listing, graph, and decompiler; APK analysis; the SQL inspector; dump; plugins; Aero networking; the Android runtime; the debugger; and live process attach with `.euphp` patches. It also ships a first-run tour and three sample files. This is not the v0.5 milestone in section 4: the plugin ABI, 72-hour fuzzing, usability exit criteria, and ARM64 work still belong to that milestone. The dates below remain the plan for v1.0, not a gate on the beta.
+
 ## 1. Positioning and honest claims
 
 IDA Pro has more than two decades of processor modules, type libraries, a mature decompiler, a debugger, and a plugin ecosystem. Euphoria will not match that in ten months, and the README should say so on day one. Claiming to beat IDA across the board is the fastest way to lose credibility with the exact audience that would buy this.
@@ -878,4 +882,4 @@ Both exist now in a first form, ahead of the original order, because they were t
 
 The decompiler is its own crate. It goes from machine code through an intermediate form and SSA to structured pseudocode, and its check compares the behavior of recompiled output against the original build at several optimization levels. Next up are struct recovery, type propagation across calls, more import signatures, lifting common vector code, and ARM64.
 
-The debugger uses the Windows debug API on one worker thread. Next up are hardware breakpoints, attaching to a running process, editing registers and memory, a real call stack from unwind data, and a Linux backend.
+The debugger uses the Windows debug API on one worker thread for programs it launches, and a separate read-only path for attaching to a running process. Attaching loads the main module at its live base with mapped bytes and shows thread registers, stack, memory, modules and live code in the Debugger tab. Next up are hardware breakpoints, applying breakpoints and stepping to an attached process, a real call stack from unwind data, and a Linux backend.

@@ -38,6 +38,10 @@ enum Command {
     Inspect {
         path: PathBuf,
     },
+    /// Print a stable summary of a binary for diffs and automation.
+    Overview {
+        path: PathBuf,
+    },
     Strings {
         path: PathBuf,
     },
@@ -66,6 +70,11 @@ enum Command {
     },
     Apk {
         path: PathBuf,
+    },
+    /// Write the bundled synthetic APK sample.
+    Sample {
+        #[arg(short, long, default_value = "demo.apk")]
+        out: PathBuf,
     },
     Dump {
         path: PathBuf,
@@ -132,12 +141,14 @@ fn main() -> Result<()> {
         Command::Decompile { path, target } => decompile(&path, &target),
         Command::Lookup { path } => public_lookup(&path, cli.json),
         Command::Inspect { path } => inspect(&path, cli.json),
+        Command::Overview { path } => overview(&path, cli.json),
         Command::Strings { path } => strings(&path, cli.json),
         Command::Xor { path } => xor(&path, cli.json),
         Command::Links { path } => links(&path, cli.json),
         Command::Redirect { path, url, out } => redirect(&path, &url, &out),
         Command::Sql { path } => sql(&path, cli.json),
         Command::Apk { path } => apk(&path, cli.json),
+        Command::Sample { out } => sample(&out, cli.json),
         Command::Dump {
             path,
             out,
@@ -292,6 +303,19 @@ fn apk(path: &Path, json: bool) -> Result<()> {
     for warning in &apk.warnings {
         eprintln!("warning: {warning}");
     }
+    Ok(())
+}
+
+fn sample(out: &Path, json: bool) -> Result<()> {
+    let bytes = euphoria_apk::samples::demo_apk();
+    std::fs::write(out, &bytes).with_context(|| format!("cannot write {}", out.display()))?;
+    if json {
+        return print_json(&serde_json::json!({
+            "path": out.display().to_string(),
+            "bytes": bytes.len(),
+        }));
+    }
+    println!("wrote {} ({} bytes)", out.display(), bytes.len());
     Ok(())
 }
 
@@ -539,6 +563,71 @@ fn inspect(path: &Path, json: bool) -> Result<()> {
             "{:?}: {} ({})",
             detection.confidence, detection.name, detection.evidence
         );
+    }
+    Ok(())
+}
+
+fn overview(path: &Path, json: bool) -> Result<()> {
+    let analysis = Analysis::open(path)?;
+    let listing = analysis.listing();
+    let report = euphoria_engine::overview(&analysis, &listing);
+    if json {
+        return print_json(&report);
+    }
+
+    println!("file:     {}", report.file);
+    println!("arch:     {}", report.arch);
+    println!("sha256:   {}", report.sha256);
+    println!("size:     {} bytes", report.size);
+    println!("entry:    {:#x}", report.entry);
+    println!(
+        "entropy:  {:.2} / 8.00 ({})",
+        report.entropy,
+        entropy_label(report.entropy)
+    );
+    println!(
+        "routines: {} ({:.1}% of executable bytes)",
+        report.routine_count, report.code_coverage
+    );
+    println!("strings:  {}", report.string_count);
+    println!("xrefs:    {}", report.xref_count);
+    println!("imports:  {}", report.import_count);
+
+    if !report.sections.is_empty() {
+        println!("sections:");
+        for section in &report.sections {
+            let kind = if section.executable { "code" } else { "data" };
+            println!(
+                "  {:<12} {:#018x} {:>10} {:.2}  {kind}",
+                section.name, section.va, section.size, section.entropy
+            );
+        }
+    }
+    if !report.largest.is_empty() {
+        println!("largest routines:");
+        for routine in &report.largest {
+            println!(
+                "  {:#018x} {:>8}  {}",
+                routine.va,
+                routine.size,
+                routine.name.as_deref().unwrap_or("-")
+            );
+        }
+    }
+    if !report.detections.is_empty() {
+        println!("detections:");
+        for detection in &report.detections {
+            println!(
+                "  {:?}: {} ({})",
+                detection.confidence, detection.name, detection.evidence
+            );
+        }
+    }
+    if !report.findings.is_empty() {
+        println!("findings:");
+        for finding in &report.findings {
+            println!("  - {finding}");
+        }
     }
     Ok(())
 }

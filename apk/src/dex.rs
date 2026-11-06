@@ -467,8 +467,7 @@ pub(crate) fn java_name(descriptor: &str) -> String {
     inner.replace('/', ".")
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+pub(crate) mod sample {
     use super::*;
 
     const INTERNET_STRING: usize = 0;
@@ -575,6 +574,12 @@ pub(crate) mod tests {
         file.extend(body);
         file
     }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::sample::sample_dex;
+    use super::*;
 
     #[test]
     fn reads_classes_methods_and_fields() {

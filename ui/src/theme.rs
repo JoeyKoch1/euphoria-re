@@ -13,6 +13,8 @@ pub const GRAPH_BORDER: Color32 = Color32::from_rgb(0x38, 0x38, 0x38);
 
 pub const TEXT: Color32 = Color32::from_rgb(0xD8, 0xD8, 0xD8);
 pub const MUTED: Color32 = Color32::from_rgb(0x8C, 0x8C, 0x8C);
+pub const PATCHED: Color32 = Color32::from_rgb(0x78, 0x78, 0x78);
+pub const GUESSED: Color32 = Color32::from_rgb(0xC9, 0x9A, 0x52);
 pub const ACCENT: Color32 = Color32::from_rgb(0x8F, 0xD0, 0x8F);
 pub const ERROR: Color32 = Color32::from_rgb(0xE0, 0x6C, 0x75);
 

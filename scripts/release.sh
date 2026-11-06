@@ -34,6 +34,10 @@ for name in euphoria eu; do
     done
 done
 
+# The guided tour and docs refer to these files, so they ship next to the binaries.
+mkdir -p dist/samples
+cp samples/hello.exe samples/encoded.exe samples/demo.apk dist/samples/
+
 # Fails the release if the current user's folder still appears in a binary.
 for file in dist/*; do
     if grep -a -q -F "$user_home" "$file"; then

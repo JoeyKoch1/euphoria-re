@@ -235,6 +235,8 @@ impl Debugger {
             }
             Command::Pause => {}
             Command::Stop => self.terminate(),
+            Command::WriteMemory { address, bytes } => self.write_memory(address, &bytes),
+            Command::WriteRegister { name, value } => self.write_register(name, value),
             Command::SelectThread(thread) => {
                 if self.threads.contains_key(&thread) {
                     self.view_thread = thread;
@@ -259,6 +261,9 @@ impl Debugger {
             Command::AddBreakpoint(_)
             | Command::RemoveBreakpoint(_)
             | Command::ReadMemory { .. } => self.handle_any(command),
+            Command::WriteMemory { .. } | Command::WriteRegister { .. } => {
+                self.log("Pause the program before editing memory or registers.".to_owned());
+            }
             _ => {}
         }
     }
@@ -689,6 +694,73 @@ impl Debugger {
         bytes
     }
 
+    // Breakpoints stay armed: the edited byte becomes the new original and the trap stays in place.
+    fn write_memory(&mut self, address: u64, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let mut content = bytes.to_vec();
+        let end = address.saturating_add(bytes.len() as u64);
+        for (&at, breakpoint) in self.breakpoints.range_mut(address..end) {
+            let offset = (at - address) as usize;
+            breakpoint.original = content[offset];
+            if self.rearm != Some(at) {
+                content[offset] = INT3;
+            }
+        }
+
+        let mut total = 0;
+        let mut failed = None;
+        while total < content.len() {
+            let page_left = 0x1000 - ((address as usize + total) & 0xFFF);
+            let chunk = page_left.min(content.len() - total);
+            let mut written = 0;
+            let done = unsafe {
+                WriteProcessMemory(
+                    self.process,
+                    (address + total as u64) as *const c_void,
+                    content[total..].as_ptr().cast(),
+                    chunk,
+                    &mut written,
+                )
+            };
+            if done == 0 || written != chunk {
+                failed = Some(address + total as u64);
+                break;
+            }
+            total += written;
+        }
+        unsafe { FlushInstructionCache(self.process, address as *const c_void, total) };
+
+        match failed {
+            Some(at) => self.log(format!("Could not write memory at {at:#x}")),
+            None => {
+                self.log(format!("Wrote {} byte(s) at {address:#x}", content.len()));
+                self.refresh();
+            }
+        }
+    }
+
+    fn write_register(&mut self, name: &str, value: u64) {
+        let Some(&handle) = self.threads.get(&self.view_thread) else {
+            self.log("No thread is selected.".to_owned());
+            return;
+        };
+        let outcome = if self.launch.bits == 32 {
+            self.with_context32(handle, |context| set_register32(context, name, value))
+        } else {
+            self.with_context64(handle, |context| set_register64(context, name, value))
+        };
+        match outcome {
+            Some((true, true)) => {
+                self.log(format!("{name} = {value:#x}"));
+                self.refresh();
+            }
+            Some((true, false)) => self.log(format!("Could not change {name}")),
+            _ => self.log(format!("{name} cannot be changed")),
+        }
+    }
+
     fn with_context64<T>(
         &self,
         handle: HANDLE,
@@ -803,6 +875,17 @@ impl Debugger {
     }
 
     fn report(&self, reason: StopReason) {
+        self.emit(Event::Stopped(Box::new(self.snapshot(reason))));
+    }
+
+    // Redraws the current stop after an edit without logging another stop.
+    fn refresh(&self) {
+        if let Some(reason) = &self.exception_reason {
+            self.emit(Event::Refreshed(Box::new(self.snapshot(reason.clone()))));
+        }
+    }
+
+    fn snapshot(&self, reason: StopReason) -> Snapshot {
         let (ip, sp, registers) = self.registers_of(self.view_thread);
         let width = (self.launch.bits / 8) as usize;
         let raw_stack = self.read(sp, STACK_SLOTS * width);
@@ -816,7 +899,7 @@ impl Debugger {
             })
             .collect();
         let bytes = self.read(ip, CODE_LINES * MAX_INSTRUCTION);
-        self.emit(Event::Stopped(Box::new(Snapshot {
+        Snapshot {
             reason,
             thread: self.view_thread,
             threads: self.threads.keys().copied().collect(),
@@ -827,6 +910,95 @@ impl Debugger {
             code: disassemble(&bytes, ip, self.launch.bits, CODE_LINES),
             modules: self.modules.values().cloned().collect(),
             delta: self.delta,
-        })));
+        }
+    }
+}
+
+fn set_register32(context: &mut WOW64_CONTEXT, name: &str, value: u64) -> bool {
+    let value = value as u32;
+    match name {
+        "eax" => context.Eax = value,
+        "ebx" => context.Ebx = value,
+        "ecx" => context.Ecx = value,
+        "edx" => context.Edx = value,
+        "esi" => context.Esi = value,
+        "edi" => context.Edi = value,
+        "ebp" => context.Ebp = value,
+        "esp" => context.Esp = value,
+        "eip" => context.Eip = value,
+        "eflags" => context.EFlags = value,
+        _ => return false,
+    }
+    true
+}
+
+fn set_register64(context: &mut CONTEXT, name: &str, value: u64) -> bool {
+    match name {
+        "rax" => context.Rax = value,
+        "rbx" => context.Rbx = value,
+        "rcx" => context.Rcx = value,
+        "rdx" => context.Rdx = value,
+        "rsi" => context.Rsi = value,
+        "rdi" => context.Rdi = value,
+        "rbp" => context.Rbp = value,
+        "rsp" => context.Rsp = value,
+        "r8" => context.R8 = value,
+        "r9" => context.R9 = value,
+        "r10" => context.R10 = value,
+        "r11" => context.R11 = value,
+        "r12" => context.R12 = value,
+        "r13" => context.R13 = value,
+        "r14" => context.R14 = value,
+        "r15" => context.R15 = value,
+        "rip" => context.Rip = value,
+        "eflags" => context.EFlags = value as u32,
+        _ => return false,
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CONTEXT, WOW64_CONTEXT, set_register32, set_register64};
+
+    fn context32() -> WOW64_CONTEXT {
+        // SAFETY: the Windows context structures are plain data and accept an all-zero state.
+        unsafe { std::mem::zeroed() }
+    }
+
+    fn context64() -> CONTEXT {
+        // SAFETY: the Windows context structures are plain data and accept an all-zero state.
+        unsafe { std::mem::zeroed() }
+    }
+
+    #[test]
+    fn writes_32_bit_registers_by_name() {
+        let mut context = context32();
+        assert!(set_register32(&mut context, "eip", 0x1234_5678));
+        assert!(set_register32(&mut context, "eax", 0xFFFF_FFFF_DEAD_BEEF));
+        assert_eq!(context.Eip, 0x1234_5678);
+        assert_eq!(context.Eax, 0xDEAD_BEEF);
+        assert!(!set_register32(&mut context, "rax", 1));
+    }
+
+    #[test]
+    fn writes_64_bit_registers_by_name() {
+        let mut context = context64();
+        assert!(set_register64(&mut context, "rip", 0x1_4000_1000));
+        assert!(set_register64(&mut context, "r15", 0xDEAD_BEEF_CAFE_BABE));
+        assert_eq!(context.Rip, 0x1_4000_1000);
+        assert_eq!(context.R15, 0xDEAD_BEEF_CAFE_BABE);
+        assert!(!set_register64(&mut context, "eax", 1));
+    }
+
+    #[test]
+    fn keeps_the_flag_register_32_bit() {
+        let mut context = context64();
+        assert!(set_register64(
+            &mut context,
+            "eflags",
+            0xFFFF_FFFF_0000_0202
+        ));
+        assert_eq!(context.EFlags, 0x202);
     }
 }

@@ -49,6 +49,8 @@ pub struct Manifest {
     pub cleartext_traffic: Option<bool>,
     pub permissions: Vec<String>,
     pub components: Vec<Component>,
+    // Fully qualified, resolved against the package. Some APKs have no launcher at all.
+    pub launcher_activity: Option<String>,
 }
 
 struct Attribute {
@@ -210,6 +212,10 @@ pub(crate) fn parse(data: &[u8]) -> Result<(Manifest, String)> {
     let mut manifest = Manifest::default();
     let mut xml = String::new();
     let mut depth = 0usize;
+    let mut elements: Vec<String> = Vec::new();
+    let mut component: Option<String> = None;
+    let mut filter_main = false;
+    let mut filter_launcher = false;
 
     let mut at = usize::from(reader.u16_at(2).unwrap_or(8));
     while let (Some(kind), Some(size)) = (reader.u16_at(at), reader.u32_at(at + 4)) {
@@ -235,6 +241,13 @@ pub(crate) fn parse(data: &[u8]) -> Result<(Manifest, String)> {
                     .unwrap_or_default();
                 let attributes = read_attributes(&reader, at, &strings, &resources);
 
+                track_launcher(
+                    &name,
+                    &attributes,
+                    &mut component,
+                    &mut filter_main,
+                    &mut filter_launcher,
+                );
                 apply(&mut manifest, &name, &attributes);
                 let _ = write!(xml, "{}<{name}", "  ".repeat(depth));
                 for attribute in &attributes {
@@ -242,6 +255,7 @@ pub(crate) fn parse(data: &[u8]) -> Result<(Manifest, String)> {
                 }
                 xml.push_str(">\n");
                 depth += 1;
+                elements.push(name);
             }
             CHUNK_END_ELEMENT => {
                 depth = depth.saturating_sub(1);
@@ -249,6 +263,21 @@ pub(crate) fn parse(data: &[u8]) -> Result<(Manifest, String)> {
                     .u32_at(at + 20)
                     .and_then(|index| strings.get(index as usize))
                     .map_or("", String::as_str);
+                let closed = elements.pop().unwrap_or_else(|| name.to_owned());
+                if closed == "intent-filter" {
+                    if filter_main
+                        && filter_launcher
+                        && manifest.launcher_activity.is_none()
+                        && let Some(component) = &component
+                    {
+                        manifest.launcher_activity =
+                            Some(resolve_component(&manifest.package, component));
+                    }
+                    filter_main = false;
+                    filter_launcher = false;
+                } else if closed == "activity" || closed == "activity-alias" {
+                    component = None;
+                }
                 let _ = writeln!(xml, "{}</{name}>", "  ".repeat(depth));
             }
             _ => {}
@@ -261,6 +290,55 @@ pub(crate) fn parse(data: &[u8]) -> Result<(Manifest, String)> {
     }
 
     Ok((manifest, xml))
+}
+
+// The launcher is not an attribute; it is an activity whose intent-filter declares MAIN and
+// LAUNCHER. Keeping this here means the analyzer and the Android runtime share one parser.
+fn track_launcher(
+    element: &str,
+    attributes: &[Attribute],
+    component: &mut Option<String>,
+    filter_main: &mut bool,
+    filter_launcher: &mut bool,
+) {
+    match element {
+        "activity" | "activity-alias" => {
+            *component = find(attributes, "name").map(str::to_owned);
+        }
+        "intent-filter" => {
+            *filter_main = false;
+            *filter_launcher = false;
+        }
+        "action" => {
+            if find(attributes, "name") == Some("android.intent.action.MAIN") {
+                *filter_main = true;
+            }
+        }
+        "category" => {
+            if matches!(
+                find(attributes, "name"),
+                Some(
+                    "android.intent.category.LAUNCHER"
+                        | "android.intent.category.LEANBACK_LAUNCHER"
+                )
+            ) {
+                *filter_launcher = true;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn resolve_component(package: &str, name: &str) -> String {
+    if package.is_empty() {
+        name.to_owned()
+    } else if name.starts_with('.') {
+        format!("{package}{name}")
+    } else if name.contains('.') {
+        name.to_owned()
+    } else {
+        format!("{package}.{name}")
+    }
 }
 
 fn read_attributes(
@@ -308,8 +386,7 @@ fn read_attributes(
         .collect()
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+pub(crate) mod sample {
     use super::*;
 
     const TYPE_INT: u8 = 0x10;
@@ -421,6 +498,11 @@ pub(crate) mod tests {
             "android.permission.INTERNET",
             "android.permission.READ_SMS",
             ".MainActivity",
+            "intent-filter",
+            "action",
+            "android.intent.action.MAIN",
+            "category",
+            "android.intent.category.LAUNCHER",
         ];
         let resources: [u32; 7] = [
             0x0101_0003,
@@ -454,6 +536,12 @@ pub(crate) mod tests {
             12,
             &[(0, TYPE_STRING, 17), (6, TYPE_BOOL, 0xFFFF_FFFF)],
         ));
+        body.extend(start(18, &[]));
+        body.extend(start(19, &[(0, TYPE_STRING, 20)]));
+        body.extend(end(19));
+        body.extend(start(21, &[(0, TYPE_STRING, 22)]));
+        body.extend(end(21));
+        body.extend(end(18));
         body.extend(end(12));
         body.extend(end(11));
         body.extend(end(8));
@@ -465,6 +553,12 @@ pub(crate) mod tests {
         file.extend(body);
         file
     }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::sample::sample_manifest;
+    use super::*;
 
     #[test]
     fn reads_the_manifest() {
@@ -483,11 +577,24 @@ pub(crate) mod tests {
         assert_eq!(manifest.components[0].kind, "activity");
         assert_eq!(manifest.components[0].name, ".MainActivity");
         assert_eq!(manifest.components[0].exported, Some(true));
+        assert_eq!(
+            manifest.launcher_activity.as_deref(),
+            Some("com.example.app.MainActivity")
+        );
 
         assert!(xml.contains("<manifest"));
         assert!(xml.contains("package=\"com.example.app\""));
         assert!(xml.contains("  <application debuggable=\"true\">"));
+        assert!(xml.contains("<intent-filter>"));
         assert!(xml.trim_end().ends_with("</manifest>"));
+    }
+
+    #[test]
+    fn launcher_names_are_qualified_against_the_package() {
+        assert_eq!(resolve_component("a.b", ".Main"), "a.b.Main");
+        assert_eq!(resolve_component("a.b", "Main"), "a.b.Main");
+        assert_eq!(resolve_component("a.b", "x.y.Main"), "x.y.Main");
+        assert_eq!(resolve_component("", ".Main"), ".Main");
     }
 
     #[test]

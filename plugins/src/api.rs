@@ -255,6 +255,21 @@ impl Runtime {
 
         let state = Rc::clone(shared);
         api.set(
+            "rename",
+            lua.create_function(move |_, (va, name): (i64, Option<String>)| {
+                let name = name
+                    .map(|name| name.trim().to_owned())
+                    .filter(|name| !name.is_empty());
+                state.requests.borrow_mut().push(Request::Rename {
+                    va: va as u64,
+                    name,
+                });
+                Ok(())
+            })?,
+        )?;
+
+        let state = Rc::clone(shared);
+        api.set(
             "tab",
             lua.create_function(move |_, ()| Ok(state.tab.borrow().clone()))?,
         )?;
@@ -766,6 +781,34 @@ mod tests {
         assert_eq!(
             runtime.take_requests(),
             [Request::Jump(0x1000), Request::Status("done".to_owned())]
+        );
+    }
+
+    #[test]
+    fn plugins_can_rename_and_clear_routines() {
+        let runtime = load(
+            "euphoria.rename(0x1000, 'decrypt')
+             euphoria.rename(0x2000, '  ')
+             euphoria.rename(0x3000, nil)",
+        )
+        .unwrap();
+
+        assert_eq!(
+            runtime.take_requests(),
+            [
+                Request::Rename {
+                    va: 0x1000,
+                    name: Some("decrypt".to_owned()),
+                },
+                Request::Rename {
+                    va: 0x2000,
+                    name: None,
+                },
+                Request::Rename {
+                    va: 0x3000,
+                    name: None,
+                },
+            ]
         );
     }
 

@@ -16,11 +16,15 @@ pub const PERMISSION_DISCORD: &str = "discord";
 
 const ENABLED_FILE: &str = "enabled.txt";
 const MAX_PLUGIN_BYTES: u64 = 4 * 1024 * 1024;
-const EXAMPLES: [(&str, &str); 3] = [
+const EXAMPLES: [(&str, &str); 4] = [
     ("hello_tab.lua", include_str!("../examples/hello_tab.lua")),
     (
         "string_search.lua",
         include_str!("../examples/string_search.lua"),
+    ),
+    (
+        "rename_by_pattern.lua",
+        include_str!("../examples/rename_by_pattern.lua"),
     ),
     (
         "discord_presence.lua",
@@ -66,6 +70,7 @@ pub enum UiEvent {
 pub enum Request {
     Jump(u64),
     Status(String),
+    Rename { va: u64, name: Option<String> },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

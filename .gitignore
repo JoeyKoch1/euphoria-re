@@ -1,5 +1,12 @@
 /target
 /build
+/dist
+
+# Saved analyses, staged patch files, and dumps from the app.
 *.edb
 *.euph
-/dist
+*.euphp
+
+# The bundled samples in samples/ are tracked on purpose; they are inputs, not build output.
+Thumbs.db
+.DS_Store

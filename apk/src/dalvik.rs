@@ -517,7 +517,7 @@ pub(crate) fn disassemble(dex: &Dex, data: &[u8], code: &Code) -> Vec<Insn> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dex::tests::sample_dex;
+    use crate::dex::sample::sample_dex;
 
     fn decode(units: &[u16]) -> Vec<(String, String)> {
         let dex = Dex::parse("x", sample_dex()).unwrap();

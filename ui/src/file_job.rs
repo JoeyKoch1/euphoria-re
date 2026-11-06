@@ -73,7 +73,7 @@ impl FileJob {
             } else if euphoria_sql::is_sql_file(&path) {
                 LoadedFile::Sql(SqlView::new(euphoria_sql::open(&path)?))
             } else {
-                let project = Project::open(&path, &progress)?;
+                let project = Project::open(&path, progress)?;
                 progress("Indexing links...")?;
                 network.load_links(&project.listing);
                 network.restore(&project.analysis.extras);
@@ -82,6 +82,37 @@ impl FileJob {
             };
             progress("Ready")?;
             Ok(Outcome::Opened(path, Box::new(loaded), network))
+        })
+    }
+
+    // Opens the module of a running process: the file supplies headers and layout, and the
+    // process supplies the bytes that are actually mapped at each section.
+    pub fn open_live(path: PathBuf, image_base: u64, pid: u32) -> Self {
+        Self::start(move |sender, cancelled| {
+            let progress = |message| -> Result<()> {
+                ensure!(!cancelled.load(Ordering::Relaxed), "Open canceled");
+                let _ = sender.send(Event::Progress(message));
+                Ok(())
+            };
+            progress("Reading the live module...")?;
+            let process = euphoria_debugger::live::LiveProcess::open(pid)
+                .map_err(|error| anyhow::anyhow!(error))?;
+            let project = Project::open_live(
+                &path,
+                image_base,
+                |address, length| process.read(address, length),
+                progress,
+            )?;
+            progress("Indexing links...")?;
+            let mut network = NetworkState::default();
+            network.load_links(&project.listing);
+            let view = BinaryView::new(&project.analysis, &project.listing);
+            progress("Ready")?;
+            Ok(Outcome::Opened(
+                path,
+                Box::new(LoadedFile::Binary(Box::new(project), view)),
+                network,
+            ))
         })
     }
 

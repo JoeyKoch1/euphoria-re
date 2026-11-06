@@ -124,7 +124,7 @@ pub fn header(ui: &mut Ui, columns: &[Column]) {
 }
 
 pub fn row(ui: &mut Ui, widths: &Widths, selected: bool) -> Row {
-    code_row(ui, widths, selected, false, false)
+    code_row(ui, widths, selected, false, false, false)
 }
 
 pub fn marker(ui: &Ui, rect: Rect, color: Color32) {
@@ -134,7 +134,14 @@ pub fn marker(ui: &Ui, rect: Rect, color: Color32) {
 
 // `flagged` is a breakpoint, whose red bar stays put after the selection moves on. `live` is the
 // instruction a paused program would run next.
-pub fn code_row(ui: &mut Ui, widths: &Widths, selected: bool, flagged: bool, live: bool) -> Row {
+pub fn code_row(
+    ui: &mut Ui,
+    widths: &Widths,
+    selected: bool,
+    flagged: bool,
+    bookmarked: bool,
+    live: bool,
+) -> Row {
     let size = egui::vec2(ui.available_width(), ROW_HEIGHT);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
 
@@ -153,6 +160,8 @@ pub fn code_row(ui: &mut Ui, widths: &Widths, selected: bool, flagged: bool, liv
     );
     if flagged {
         marker(ui, rect, theme::BREAKPOINT);
+    } else if bookmarked {
+        marker(ui, rect, theme::CURRENT_MARK);
     } else if selected {
         marker(ui, rect, theme::ACCENT);
     }

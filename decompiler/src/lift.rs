@@ -145,6 +145,7 @@ enum Flags {
     Compare(Width),
     Result(Width),
     Sum(Width),
+    Carry,
     Float,
 }
 
@@ -866,8 +867,24 @@ impl Lifter<'_> {
                     other => intrinsic(&format!("{other:?}")),
                 }
             }
+            Flags::Carry => {
+                let carry = Expr::Var(self.flag_var(true, 1));
+                match code {
+                    C::b => carry,
+                    C::ae => carry.negated(),
+                    other => intrinsic(&format!("{other:?}")),
+                }
+            }
             Flags::Unknown => intrinsic(&format!("{code:?}")),
         }
+    }
+
+    fn float_compare(&mut self, a: Expr, b: Expr) {
+        let va = self.float_flag(true);
+        let vb = self.float_flag(false);
+        self.assign(va, a);
+        self.assign(vb, b);
+        self.state.flags = Flags::Float;
     }
 
     fn float_flag(&mut self, first: bool) -> Var {
@@ -1218,6 +1235,62 @@ impl Lifter<'_> {
         }
     }
 
+    fn vex_float_binary(&mut self, insn: &Instruction, op: BinOp, width: Width) {
+        let a = self.read_reg(insn.op1_register());
+        let b = self.float_load(insn, 2, width);
+        self.write_reg(insn.op0_register(), Expr::bin(op, a, b, 8));
+    }
+
+    fn vex_float_move(&mut self, insn: &Instruction, width: Width) {
+        if insn.op0_kind() == OpKind::Register {
+            let source = insn.op_count() - 1;
+            let value = self.float_load(insn, source, width);
+            self.write_reg(insn.op0_register(), value);
+        } else {
+            let addr = self.address(insn);
+            let value = self.read_reg(insn.op1_register());
+            self.emit(StmtKind::Store {
+                addr,
+                value,
+                width,
+                float: true,
+            });
+        }
+    }
+
+    fn bit_test(&mut self, insn: &Instruction) {
+        let width = self.op_size(insn, 0);
+        let value = self.read_op(insn, 0, width);
+        let index = match self.read_op(insn, 1, 1) {
+            Expr::Const(bits, _) => Expr::Const(bits, width),
+            other => Expr::cast(CastKind::Zext, other, width),
+        };
+        let bit = Expr::bin(
+            BinOp::And,
+            Expr::bin(BinOp::Shr, value.clone(), index.clone(), width),
+            Expr::Const(1, width),
+            width,
+        );
+        let carry = self.flag_var(true, 1);
+        self.assign(carry, Expr::cast(CastKind::Trunc, bit, 1));
+        self.state.flags = Flags::Carry;
+        if insn.mnemonic() == Mnemonic::Bt {
+            return;
+        }
+        let mask = Expr::bin(BinOp::Shl, Expr::Const(1, width), index, width);
+        let result = match insn.mnemonic() {
+            Mnemonic::Bts => Expr::bin(BinOp::Or, value, mask, width),
+            Mnemonic::Btr => Expr::bin(
+                BinOp::And,
+                value,
+                Expr::Un(UnOp::Not, Box::new(mask), width),
+                width,
+            ),
+            _ => Expr::bin(BinOp::Xor, value, mask, width),
+        };
+        self.write_op(insn, 0, result, width);
+    }
+
     fn string_op(&mut self, insn: &Instruction) -> bool {
         if !insn.has_rep_prefix() && !insn.has_repe_prefix() {
             return false;
@@ -1506,6 +1579,77 @@ impl Lifter<'_> {
                 let value = Expr::Intrinsic("__bswap".into(), vec![a], width);
                 self.write_op(insn, 0, value, width);
             }
+            M::Bt | M::Bts | M::Btr | M::Btc => self.bit_test(insn),
+            M::Bsf | M::Bsr => {
+                let width = self.op_size(insn, 1);
+                let source = self.read_op(insn, 1, width);
+                let name = if insn.mnemonic() == M::Bsf {
+                    "__bsf"
+                } else {
+                    "__bsr"
+                };
+                let result = Expr::Intrinsic(name.into(), vec![source], width);
+                self.write_reg(insn.op0_register(), result);
+                self.state.flags = Flags::Unknown;
+            }
+            M::Popcnt | M::Tzcnt | M::Lzcnt => {
+                let width = self.op_size(insn, 0);
+                let source_width = self.op_size(insn, 1);
+                let source = self.read_op(insn, 1, source_width);
+                let name = match insn.mnemonic() {
+                    M::Popcnt => "__popcnt",
+                    M::Tzcnt => "__tzcnt",
+                    _ => "__lzcnt",
+                };
+                let result = Expr::Intrinsic(name.into(), vec![source], width);
+                let value = self.set_result(result, width);
+                self.write_reg(insn.op0_register(), value);
+            }
+            M::Shld | M::Shrd => {
+                let width = self.op_size(insn, 0);
+                let a = self.read_op(insn, 0, width);
+                let b = self.read_op(insn, 1, width);
+                let count = self.read_op(insn, 2, 1);
+                let name = if insn.mnemonic() == M::Shld {
+                    "__shld"
+                } else {
+                    "__shrd"
+                };
+                let result = Expr::Intrinsic(name.into(), vec![a, b, count], width);
+                self.write_op(insn, 0, result, width);
+                self.state.flags = Flags::Unknown;
+            }
+            M::Xadd => {
+                let width = self.op_size(insn, 0);
+                let a = self.read_op(insn, 0, width);
+                let b = self.read_op(insn, 1, width);
+                let sum = self.set_result(Expr::bin(BinOp::Add, a.clone(), b, width), width);
+                self.write_op(insn, 0, sum, width);
+                self.write_op(insn, 1, a, width);
+            }
+            M::Movbe => {
+                let width = self.op_size(insn, 0);
+                if insn.op0_kind() == OpKind::Memory {
+                    let value = self.read_reg(insn.op1_register());
+                    let swapped = Expr::Intrinsic("__bswap".into(), vec![value], width);
+                    self.write_op(insn, 0, swapped, width);
+                } else {
+                    let addr = self.address(insn);
+                    let value = Expr::load(addr, width, false);
+                    let swapped = Expr::Intrinsic("__bswap".into(), vec![value], width);
+                    self.write_reg(insn.op0_register(), swapped);
+                }
+            }
+            M::Rdtsc | M::Rdtscp => {
+                let high = Expr::Intrinsic("__rdtsc_high".into(), Vec::new(), 4);
+                let low = Expr::Intrinsic("__rdtsc_low".into(), Vec::new(), 4);
+                self.write_reg(Register::EDX, high);
+                self.write_reg(Register::EAX, low);
+                if insn.mnemonic() == M::Rdtscp {
+                    let aux = Expr::Intrinsic("__rdtscp_aux".into(), Vec::new(), 4);
+                    self.write_reg(Register::ECX, aux);
+                }
+            }
             M::Adc | M::Sbb => {
                 let width = self.op_size(insn, 0);
                 let carry = self.condition(ConditionCode::b);
@@ -1579,12 +1723,73 @@ impl Lifter<'_> {
                 let is_single = matches!(insn.mnemonic(), M::Ucomiss | M::Comiss);
                 let a = self.read_reg(insn.op0_register());
                 let b = self.float_load(insn, 1, if is_single { 4 } else { 8 });
-                let va = self.float_flag(true);
-                let vb = self.float_flag(false);
-                self.assign(va, a);
-                self.assign(vb, b);
-                self.state.flags = Flags::Float;
+                self.float_compare(a, b);
             }
+            M::Vucomisd | M::Vcomisd | M::Vucomiss | M::Vcomiss => {
+                let is_single = matches!(insn.mnemonic(), M::Vucomiss | M::Vcomiss);
+                let a = self.read_reg(insn.op0_register());
+                let b = self.float_load(insn, 1, if is_single { 4 } else { 8 });
+                self.float_compare(a, b);
+            }
+            M::Vaddss => self.vex_float_binary(insn, BinOp::FAdd, 4),
+            M::Vaddsd => self.vex_float_binary(insn, BinOp::FAdd, 8),
+            M::Vsubss => self.vex_float_binary(insn, BinOp::FSub, 4),
+            M::Vsubsd => self.vex_float_binary(insn, BinOp::FSub, 8),
+            M::Vmulss => self.vex_float_binary(insn, BinOp::FMul, 4),
+            M::Vmulsd => self.vex_float_binary(insn, BinOp::FMul, 8),
+            M::Vdivss => self.vex_float_binary(insn, BinOp::FDiv, 4),
+            M::Vdivsd => self.vex_float_binary(insn, BinOp::FDiv, 8),
+            M::Vsqrtss | M::Vsqrtsd => {
+                let width = if insn.mnemonic() == M::Vsqrtsd { 8 } else { 4 };
+                let source = insn.op_count() - 1;
+                let value = self.float_load(insn, source, width);
+                let root = Expr::Intrinsic("sqrt".into(), vec![value], 8);
+                self.write_reg(insn.op0_register(), root);
+            }
+            M::Vcvtsi2ss | M::Vcvtsi2sd => {
+                let source = insn.op_count() - 1;
+                let width = self.op_size(insn, source);
+                let value = self.read_op(insn, source, width);
+                self.write_reg(insn.op0_register(), Expr::cast(CastKind::ToFloat, value, 8));
+            }
+            M::Vcvttsd2si | M::Vcvttss2si | M::Vcvtsd2si | M::Vcvtss2si => {
+                let is_single = matches!(insn.mnemonic(), M::Vcvttss2si | M::Vcvtss2si);
+                let width = if is_single { 4 } else { 8 };
+                let source = insn.op_count() - 1;
+                let value = self.float_load(insn, source, width);
+                let target = self.op_size(insn, 0);
+                self.write_reg(
+                    insn.op0_register(),
+                    Expr::cast(CastKind::FromFloat, value, target),
+                );
+            }
+            M::Vcvtss2sd | M::Vcvtsd2ss => {
+                let width = if insn.mnemonic() == M::Vcvtss2sd {
+                    4
+                } else {
+                    8
+                };
+                let source = insn.op_count() - 1;
+                let value = self.float_load(insn, source, width);
+                self.write_reg(insn.op0_register(), value);
+            }
+            M::Vmovss => self.vex_float_move(insn, 4),
+            M::Vmovsd => self.vex_float_move(insn, 8),
+            M::Vmovaps | M::Vmovapd | M::Vmovups | M::Vmovupd | M::Vmovdqa | M::Vmovdqu
+                if insn.op0_kind() == OpKind::Register && insn.op1_kind() == OpKind::Register =>
+            {
+                let value = self.read_reg(insn.op1_register());
+                self.write_reg(insn.op0_register(), value);
+            }
+            M::Vxorps | M::Vxorpd | M::Vpxor
+                if insn.op0_kind() == OpKind::Register
+                    && insn.op1_kind() == OpKind::Register
+                    && insn.op2_kind() == OpKind::Register
+                    && insn.op1_register() == insn.op2_register() =>
+            {
+                self.write_reg(insn.op0_register(), Expr::Float(0.0));
+            }
+            M::Vzeroupper | M::Vzeroall => {}
             mnemonic => {
                 if insn.condition_code() != ConditionCode::None {
                     if self.conditional(insn, mnemonic) {

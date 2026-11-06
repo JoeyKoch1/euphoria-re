@@ -1,6 +1,8 @@
 #[cfg(all(windows, target_arch = "x86_64"))]
 mod windows;
 
+pub mod live;
+
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -34,6 +36,8 @@ pub enum Command {
     AddBreakpoint(u64),
     RemoveBreakpoint(u64),
     ReadMemory { address: u64, len: usize },
+    WriteMemory { address: u64, bytes: Vec<u8> },
+    WriteRegister { name: &'static str, value: u64 },
     SelectThread(u32),
 }
 
@@ -93,6 +97,7 @@ pub enum Event {
     Started { pid: u32, base: u64 },
     Running,
     Stopped(Box<Snapshot>),
+    Refreshed(Box<Snapshot>),
     Memory { address: u64, bytes: Vec<u8> },
     Log(String),
     Exited(u32),
